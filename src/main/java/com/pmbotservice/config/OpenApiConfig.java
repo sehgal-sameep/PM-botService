@@ -1,0 +1,110 @@
+package com.pmbotservice.config;
+
+import com.pmbotservice.context.RequestHeaders;
+import com.pmbotservice.web.controller.SessionDebugController;
+import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.Operation;
+import io.swagger.v3.oas.models.info.Contact;
+import io.swagger.v3.oas.models.info.Info;
+import io.swagger.v3.oas.models.parameters.Parameter;
+import io.swagger.v3.oas.models.servers.Server;
+import java.util.List;
+import org.springdoc.core.customizers.OperationCustomizer;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.method.HandlerMethod;
+
+/**
+ * API metadata plus a global {@link OperationCustomizer} that documents the cross-cutting headers
+ * ({@code X-Correlation-Id}, {@code X-User-Id}, {@code X-Tenant-Id}, {@code X-Org-Id}) on every
+ * business-request operation, rather than repeating {@code @Parameter} annotations on each
+ * controller method. Skipped for {@link SessionDebugController} — that temporary endpoint takes
+ * none of these (only a session cookie + tenant header), and marking {@code X-Tenant-Id}/{@code
+ * X-Org-Id} as required there would be actively misleading since it never reads them.
+ *
+ * <p>Servers are listed explicitly: the shared dev environment first (Swagger UI's default
+ * selection), then this local instance. Server URLs carry no path — every operation path already
+ * includes the {@code /back-office-ai} base path.
+ */
+@Configuration
+public class OpenApiConfig {
+
+  private static final String DEV_SERVER_URL = "https://nsitg.bo-dev.fm.outseer.com";
+
+  @Bean
+  public OpenAPI pmBotServiceOpenApi(@Value("${server.port:8080}") int serverPort) {
+    return new OpenAPI()
+        .servers(
+            List.of(
+                new Server().url(DEV_SERVER_URL).description("Dev"),
+                new Server().url("http://localhost:" + serverPort).description("Local")))
+        .info(
+            new Info()
+                .title("Policy Manager Chatbot Backend")
+                .version("v1")
+                .description(
+                    "Stateless, non-blocking (Spring WebFlux/Reactor) integration/orchestration "
+                        + "layer between the Policy Manager chatbot capability and the external ML/AI "
+                        + "Agent. This service holds no conversation state between requests — it "
+                        + "validates each request, forwards it to the ML Agent through a circuit "
+                        + "breaker, bulkhead, and bounded retry, and streams the response back over "
+                        + "SSE. The ML Agent's response events are forwarded as-is — same event "
+                        + "names, field names, and nesting as its protobuf contract — with no "
+                        + "backend-owned response schema in between. Conversation memory (if any) is owned entirely by the ML Agent; this "
+                        + "backend does not implement any ML/LLM logic itself. The ML Agent is "
+                        + "currently a configurable mock — see the 'Chat' endpoint description for the "
+                        + "scenario-simulation keywords.")
+                .contact(new Contact().name("Policy Manager Platform Team")));
+  }
+
+  @Bean
+  public OperationCustomizer commonHeaderParametersCustomizer() {
+    return this::addCommonHeaders;
+  }
+
+  private Operation addCommonHeaders(Operation operation, HandlerMethod handlerMethod) {
+    if (handlerMethod.getBeanType().equals(SessionDebugController.class)) {
+      return operation;
+    }
+    operation.addParametersItem(
+        new Parameter()
+            .in("header")
+            .name(RequestHeaders.CORRELATION_ID)
+            .required(false)
+            .description(
+                "Caller-supplied correlation ID for tracing this interaction across "
+                    + "logs; a new one is generated and echoed back on the response if omitted.")
+            .example("3f2c9e1a-1234-4c56-9abc-1234567890ab"));
+    operation.addParametersItem(
+        new Parameter()
+            .in("header")
+            .name(RequestHeaders.USER_ID)
+            .required(false)
+            .description(
+                "Placeholder analyst identity header, standing in for a real "
+                    + "authentication principal (JWT/session) until the platform's auth "
+                    + "mechanism is wired in.")
+            .example("analyst-1"));
+    operation.addParametersItem(
+        new Parameter()
+            .in("header")
+            .name(RequestHeaders.TENANT_ID)
+            .required(true)
+            .description(
+                "Tenant identifier. Required on every request — a blank or missing "
+                    + "value is rejected with a 400 validation error.")
+            .example("tenant-123"));
+    operation.addParametersItem(
+        new Parameter()
+            .in("header")
+            .name(RequestHeaders.ORGANIZATION_ID)
+            .required(true)
+            .description(
+                "Organization identifier, forwarded to the ML Agent's request "
+                    + "context. Required on every request — a blank or missing value is "
+                    + "rejected with a 400 validation error.")
+            .example("org-123"));
+    return operation;
+  }
+}

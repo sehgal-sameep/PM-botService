@@ -1,0 +1,27 @@
+package com.pmbotservice.service;
+
+import com.pmbotservice.context.RequestContext;
+import com.pmbotservice.web.dto.ChatRequest;
+import org.springframework.http.codec.ServerSentEvent;
+import reactor.core.publisher.Flux;
+
+/**
+ * Glue between the web layer and the ML Agent: forwards one chat message, applies resilience
+ * (circuit breaker, bulkhead, timeout, retry), and relays the response as a stream of SSE events.
+ * This is the one contract {@link com.pmbotservice.web.controller.ChatController} depends on — it
+ * never sees {@link ChatOrchestrationServiceImpl} or any resilience/ML Agent detail directly, so
+ * that implementation is free to change (e.g. a different resilience strategy, or splitting the
+ * pipeline differently) without touching the web layer.
+ */
+public interface ChatOrchestrationService {
+
+  /**
+   * Streams the ML Agent's response to one chat message as a cold {@code Flux}: nothing happens
+   * until subscribed. Each ML Agent event is relayed as-is (its own event name and payload); a
+   * failure that produced no agent event of its own — before or after the response has started
+   * streaming — surfaces as a {@code service_error} SSE event on this same stream rather than a
+   * distinct HTTP status, since the response is already committed at 200 by the time Spring starts
+   * writing elements.
+   */
+  Flux<ServerSentEvent<Object>> streamMessage(RequestContext context, ChatRequest request);
+}
