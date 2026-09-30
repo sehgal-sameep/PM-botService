@@ -33,7 +33,7 @@ public class OpenApiConfig {
   private static final String DEV_SERVER_URL = "https://nsitg.bo-dev.fm.outseer.com";
 
   @Bean
-  public OpenAPI pmBotServiceOpenApi(@Value("${server.port:8080}") int serverPort) {
+  public OpenAPI pmBotServiceOpenApi(@Value("${server.port:8079}") int serverPort) {
     return new OpenAPI()
         .servers(
             List.of(
