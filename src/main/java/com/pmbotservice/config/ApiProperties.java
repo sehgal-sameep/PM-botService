@@ -4,7 +4,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
  * {@code basePath} is the common prefix for every endpoint this service's own controllers expose
- * (e.g. {@code /back-office-ai} + {@code /api/v1/chat/messages}) — applied in {@link
+ * (e.g. {@code /back-office-ai/pm} + {@code /api/v1/chat/messages}) — applied in {@link
  * ApiPathConfig}. Actuator and Swagger are deliberately not prefixed, so health probes keep their
  * fixed paths. Normalized to a leading {@code /} and no trailing {@code /}; blank means no prefix.
  */

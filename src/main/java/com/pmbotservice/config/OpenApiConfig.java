@@ -25,7 +25,7 @@ import org.springframework.web.method.HandlerMethod;
  *
  * <p>Servers are listed explicitly: the shared dev environment first (Swagger UI's default
  * selection), then this local instance. Server URLs carry no path — every operation path already
- * includes the {@code /back-office-ai} base path.
+ * includes the {@code /back-office-ai/pm} base path.
  */
 @Configuration
 public class OpenApiConfig {

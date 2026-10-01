@@ -24,7 +24,7 @@ import reactor.test.StepVerifier;
  */
 class SessionAuthenticationWebFilterTest {
 
-  private static final ApiProperties API = new ApiProperties("/back-office-ai");
+  private static final ApiProperties API = new ApiProperties("/back-office-ai/pm");
 
   private static final String COOKIE_NAME = "SESSION";
   private static final String TENANT_HEADER_NAME = "X-Tenant-Id";
@@ -58,7 +58,7 @@ class SessionAuthenticationWebFilterTest {
   private static MockServerWebExchange exchangeWithSessionCookieAndTenant(
       String cookieValue, String tenant) {
     MockServerHttpRequest.BaseBuilder<?> builder =
-        MockServerHttpRequest.post("/back-office-ai/api/v1/chat/messages");
+        MockServerHttpRequest.post("/back-office-ai/pm/api/v1/chat/messages");
     if (cookieValue != null) {
       builder.cookie(new HttpCookie(COOKIE_NAME, cookieValue));
     }

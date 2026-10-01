@@ -85,7 +85,7 @@ chatbot:
     # Common prefix for every endpoint of this service's own controllers, e.g.
     # POST {base-path}/api/v1/chat/messages. Actuator (/actuator/**) and Swagger are
     # NOT prefixed, so health probes keep fixed paths. Blank = no prefix.
-    base-path: ${API_BASE_PATH:/back-office-ai}
+    base-path: ${API_BASE_PATH:/back-office-ai/pm}
   security:
     # Master toggle. BFF_SESSION = minimal validation flow enabled (production): a
     # found Redis session is trusted as authenticated, full stop — no fingerprint,

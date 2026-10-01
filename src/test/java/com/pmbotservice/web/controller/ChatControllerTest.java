@@ -46,7 +46,7 @@ class ChatControllerTest {
   void successfulChatRequest_streamsEventsInOrderAndEchoesCorrelationId() {
     restTestClient
         .post()
-        .uri("/back-office-ai/api/v1/chat/messages")
+        .uri("/back-office-ai/pm/api/v1/chat/messages")
         .header(RequestHeaders.CORRELATION_ID, "test-corr-abc")
         .header(RequestHeaders.TENANT_ID, "tenant-1")
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
@@ -84,7 +84,7 @@ class ChatControllerTest {
   void responseBody_isTheAgentsOwnContract_withNoBackendRenamingOrWrapping() {
     restTestClient
         .post()
-        .uri("/back-office-ai/api/v1/chat/messages")
+        .uri("/back-office-ai/pm/api/v1/chat/messages")
         .header(RequestHeaders.TENANT_ID, "tenant-1")
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
@@ -134,7 +134,7 @@ class ChatControllerTest {
   void requestWithHistory_isAcceptedAndStreamsNormally() {
     restTestClient
         .post()
-        .uri("/back-office-ai/api/v1/chat/messages")
+        .uri("/back-office-ai/pm/api/v1/chat/messages")
         .header(RequestHeaders.TENANT_ID, "tenant-1")
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
@@ -162,7 +162,7 @@ class ChatControllerTest {
 
     restTestClient
         .post()
-        .uri("/back-office-ai/api/v1/chat/messages")
+        .uri("/back-office-ai/pm/api/v1/chat/messages")
         .header(RequestHeaders.TENANT_ID, "tenant-1")
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
@@ -188,7 +188,7 @@ class ChatControllerTest {
   void blankMessage_returns400ValidationError() {
     restTestClient
         .post()
-        .uri("/back-office-ai/api/v1/chat/messages")
+        .uri("/back-office-ai/pm/api/v1/chat/messages")
         .header(RequestHeaders.TENANT_ID, "tenant-1")
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
@@ -205,7 +205,7 @@ class ChatControllerTest {
   void missingCaseId_isAccepted() {
     restTestClient
         .post()
-        .uri("/back-office-ai/api/v1/chat/messages")
+        .uri("/back-office-ai/pm/api/v1/chat/messages")
         .header(RequestHeaders.TENANT_ID, "tenant-1")
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
@@ -219,7 +219,7 @@ class ChatControllerTest {
   void blankCaseId_isAccepted() {
     restTestClient
         .post()
-        .uri("/back-office-ai/api/v1/chat/messages")
+        .uri("/back-office-ai/pm/api/v1/chat/messages")
         .header(RequestHeaders.TENANT_ID, "tenant-1")
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
@@ -233,7 +233,7 @@ class ChatControllerTest {
   void invalidCaseId_returns400ValidationError() {
     restTestClient
         .post()
-        .uri("/back-office-ai/api/v1/chat/messages")
+        .uri("/back-office-ai/pm/api/v1/chat/messages")
         .header(RequestHeaders.TENANT_ID, "tenant-1")
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
@@ -250,7 +250,7 @@ class ChatControllerTest {
   void missingTenantIdHeader_returns400ValidationError() {
     restTestClient
         .post()
-        .uri("/back-office-ai/api/v1/chat/messages")
+        .uri("/back-office-ai/pm/api/v1/chat/messages")
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
         .body(Map.of("caseId", "case-1", "message", "hello"))
@@ -266,7 +266,7 @@ class ChatControllerTest {
   void missingOrganizationIdHeader_returns400ValidationError() {
     restTestClient
         .post()
-        .uri("/back-office-ai/api/v1/chat/messages")
+        .uri("/back-office-ai/pm/api/v1/chat/messages")
         .header(RequestHeaders.TENANT_ID, "tenant-1")
         .contentType(MediaType.APPLICATION_JSON)
         .body(Map.of("caseId", "case-1", "message", "hello"))
@@ -282,7 +282,7 @@ class ChatControllerTest {
   void transportFailure_streamsAServiceErrorEventInsteadOfAnHttpErrorStatus() {
     restTestClient
         .post()
-        .uri("/back-office-ai/api/v1/chat/messages")
+        .uri("/back-office-ai/pm/api/v1/chat/messages")
         .header(RequestHeaders.TENANT_ID, "tenant-1")
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
@@ -303,7 +303,7 @@ class ChatControllerTest {
   void agentErrorEvent_isForwardedUntouched_notReplacedByAServiceError() {
     restTestClient
         .post()
-        .uri("/back-office-ai/api/v1/chat/messages")
+        .uri("/back-office-ai/pm/api/v1/chat/messages")
         .header(RequestHeaders.TENANT_ID, "tenant-1")
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
@@ -327,7 +327,7 @@ class ChatControllerTest {
   void emptyResponseScenario_streamsOnlyDone() {
     restTestClient
         .post()
-        .uri("/back-office-ai/api/v1/chat/messages")
+        .uri("/back-office-ai/pm/api/v1/chat/messages")
         .header(RequestHeaders.TENANT_ID, "tenant-1")
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
@@ -348,7 +348,7 @@ class ChatControllerTest {
   void unknownRoute_returns404() {
     restTestClient
         .post()
-        .uri("/back-office-ai/api/v1/chat/does-not-exist")
+        .uri("/back-office-ai/pm/api/v1/chat/does-not-exist")
         .contentType(MediaType.APPLICATION_JSON)
         .body(Map.of())
         .exchange()
