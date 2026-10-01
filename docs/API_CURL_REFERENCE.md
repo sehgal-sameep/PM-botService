@@ -101,7 +101,7 @@ curl -N -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" \
 All optional body fields:
 
 ```bash
-  -d '{"caseId":"<case-id>","history":[],"requestId":"<your-request-id>","endUserId":"<end-user-id>","message":"<prompt>"}'
+  -d '{"caseId":"<case-id>","history":[],"requestId":"<your-request-id>","endUserId":"<end-user-id>","operatorId":"<operator-id>","message":"<prompt>"}'
 ```
 
 ### 1.2 Security mode `BFF_SESSION`
