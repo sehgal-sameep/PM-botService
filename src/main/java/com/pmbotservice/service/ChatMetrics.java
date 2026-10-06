@@ -12,8 +12,8 @@ import org.springframework.stereotype.Component;
  * The only class in this service allowed to touch {@link MeterRegistry} directly. Every method
  * takes a fixed, low-cardinality argument (a small enum-like result string) rather than exposing
  * the registry itself — structurally impossible for a caller to accidentally tag a metric with a
- * high-cardinality value like {@code caseId}/{@code userId}, which Micrometer's own docs warn can
- * silently blow up a metrics backend.
+ * high-cardinality value like {@code messageId}/{@code userId}, which Micrometer's own docs warn
+ * can silently blow up a metrics backend.
  */
 @Component
 public class ChatMetrics {

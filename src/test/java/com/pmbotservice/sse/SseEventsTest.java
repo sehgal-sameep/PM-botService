@@ -6,11 +6,12 @@ import com.google.protobuf.util.JsonFormat;
 import com.pmbotservice.common.ErrorCode;
 import com.pmbotservice.mlagent.grpc.v1.AnswerEvent;
 import com.pmbotservice.mlagent.grpc.v1.AnswerPayload;
-import com.pmbotservice.mlagent.grpc.v1.CaseManagerAnswerPayload;
 import com.pmbotservice.mlagent.grpc.v1.Chunk;
 import com.pmbotservice.mlagent.grpc.v1.Done;
 import com.pmbotservice.mlagent.grpc.v1.Error;
+import com.pmbotservice.mlagent.grpc.v1.GeneratedPolicy;
 import com.pmbotservice.mlagent.grpc.v1.Ping;
+import com.pmbotservice.mlagent.grpc.v1.PolicyManagerAnswerPayload;
 import com.pmbotservice.mlagent.grpc.v1.ToolCall;
 import com.pmbotservice.mlagent.grpc.v1.ToolResult;
 import java.time.Instant;
@@ -33,8 +34,8 @@ class SseEventsTest {
           .setToolCall(
               ToolCall.newBuilder()
                   .setToolCallId("t-1")
-                  .setName("getCase")
-                  .setArgsJson("{\"caseId\":\"case-1\"}"))
+                  .setName("searchPolicies")
+                  .setArgsJson("{\"status\":\"ACTIVE\"}"))
           .build();
 
   private static final AnswerEvent TOOL_RESULT =
@@ -51,17 +52,23 @@ class SseEventsTest {
       AnswerEvent.newBuilder()
           .setPayload(
               AnswerPayload.newBuilder()
-                  .setCaseManagerAnswerPayload(
-                      CaseManagerAnswerPayload.newBuilder()
+                  .setPolicyManagerAnswerPayload(
+                      PolicyManagerAnswerPayload.newBuilder()
                           .addKeySignals(
-                              CaseManagerAnswerPayload.KeySignal.newBuilder()
-                                  .setSignal("Unusual device/IP")
-                                  .addCitations("evt-123"))
+                              PolicyManagerAnswerPayload.KeySignal.newBuilder()
+                                  .setSignal("Velocity policy is active")
+                                  .addCitations("pol-2"))
                           .addCitations(
-                              CaseManagerAnswerPayload.Citation.newBuilder()
-                                  .setId("evt-123")
-                                  .setSource("getCase")
-                                  .addFields("risk_score"))))
+                              PolicyManagerAnswerPayload.Citation.newBuilder()
+                                  .setId("pol-2")
+                                  .setSource("searchPolicies")
+                                  .addFields("policies[1].rules"))))
+          .build();
+
+  private static final AnswerEvent GENERATED_POLICY =
+      AnswerEvent.newBuilder()
+          .setGeneratedPolicy(
+              GeneratedPolicy.newBuilder().setPolicyJson("{\"name\":\"p1\",\"enabled\":false}"))
           .build();
 
   private static final AnswerEvent DONE =
@@ -92,6 +99,7 @@ class SseEventsTest {
     assertThat(SseEvents.fromAnswerEvent(DONE).event()).isEqualTo("done");
     assertThat(SseEvents.fromAnswerEvent(ERROR).event()).isEqualTo("error");
     assertThat(SseEvents.fromAnswerEvent(PING).event()).isEqualTo("ping");
+    assertThat(SseEvents.fromAnswerEvent(GENERATED_POLICY).event()).isEqualTo("generated_policy");
   }
 
   @Test
@@ -103,7 +111,15 @@ class SseEventsTest {
             .map(f -> f.getName())
             .toList();
     assertThat(contractArms)
-        .containsExactly("chunk", "tool_call", "tool_result", "payload", "done", "error", "ping");
+        .containsExactly(
+            "chunk",
+            "tool_call",
+            "tool_result",
+            "payload",
+            "done",
+            "error",
+            "ping",
+            "generated_policy");
   }
 
   @Test
@@ -111,18 +127,19 @@ class SseEventsTest {
     assertThat(data(CHUNK)).isEqualTo("{\"chunk\":{\"delta\":\"Hello\"}}");
     assertThat(data(TOOL_CALL))
         .isEqualTo(
-            "{\"tool_call\":{\"tool_call_id\":\"t-1\",\"name\":\"getCase\","
-                + "\"args_json\":\"{\\\"caseId\\\":\\\"case-1\\\"}\"}}");
+            "{\"tool_call\":{\"tool_call_id\":\"t-1\",\"name\":\"searchPolicies\","
+                + "\"args_json\":\"{\\\"status\\\":\\\"ACTIVE\\\"}\"}}");
     assertThat(data(TOOL_RESULT))
         .isEqualTo(
             "{\"tool_result\":{\"tool_call_id\":\"t-1\",\"status\":\"STATUS_OK\","
                 + "\"ms\":\"42\",\"row_count\":\"7\"}}");
     assertThat(data(PAYLOAD))
         .isEqualTo(
-            "{\"payload\":{\"case_manager_answer_payload\":{"
-                + "\"key_signals\":[{\"signal\":\"Unusual device/IP\",\"citations\":[\"evt-123\"]}],"
-                + "\"citations\":[{\"id\":\"evt-123\",\"source\":\"getCase\","
-                + "\"fields\":[\"risk_score\"]}]}}}");
+            "{\"payload\":{\"policy_manager_answer_payload\":{"
+                + "\"key_signals\":[{\"signal\":\"Velocity policy is active\","
+                + "\"citations\":[\"pol-2\"]}],"
+                + "\"citations\":[{\"id\":\"pol-2\",\"source\":\"searchPolicies\","
+                + "\"fields\":[\"policies[1].rules\"]}]}}}");
     assertThat(data(DONE))
         .isEqualTo(
             "{\"done\":{\"stop_reason\":\"STOP_REASON_COMPLETED\",\"latency_ms\":\"1800\","
@@ -130,6 +147,11 @@ class SseEventsTest {
     assertThat(data(ERROR))
         .isEqualTo("{\"error\":{\"code\":\"ERROR_CODE_MODEL_REFUSED\",\"retryable\":false}}");
     assertThat(data(PING)).isEqualTo("{\"ping\":{}}");
+    // policy_json stays a JSON string, untouched — the frontend parses it.
+    assertThat(data(GENERATED_POLICY))
+        .isEqualTo(
+            "{\"generated_policy\":{\"policy_json\":"
+                + "\"{\\\"name\\\":\\\"p1\\\",\\\"enabled\\\":false}\"}}");
   }
 
   @Test

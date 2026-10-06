@@ -14,11 +14,12 @@ import com.pmbotservice.mlagent.MlAgentClient;
 import com.pmbotservice.mlagent.MlAgentRequest;
 import com.pmbotservice.mlagent.grpc.v1.AnswerEvent;
 import com.pmbotservice.mlagent.grpc.v1.AnswerPayload;
-import com.pmbotservice.mlagent.grpc.v1.CaseManagerAnswerPayload;
 import com.pmbotservice.mlagent.grpc.v1.Chunk;
 import com.pmbotservice.mlagent.grpc.v1.Done;
 import com.pmbotservice.mlagent.grpc.v1.Error;
+import com.pmbotservice.mlagent.grpc.v1.GeneratedPolicy;
 import com.pmbotservice.mlagent.grpc.v1.Ping;
+import com.pmbotservice.mlagent.grpc.v1.PolicyManagerAnswerPayload;
 import com.pmbotservice.mlagent.grpc.v1.ToolCall;
 import com.pmbotservice.mlagent.grpc.v1.ToolResult;
 import com.pmbotservice.sse.ServiceErrorEvent;
@@ -86,11 +87,11 @@ class ChatOrchestrationServiceTest {
   }
 
   private static RequestContext context() {
-    return new RequestContext("tenant-1", "case-1", "org-1", "analyst-1", "corr-1", null);
+    return new RequestContext("tenant-1", "org-1", "analyst-1", "corr-1", null);
   }
 
   private static ChatRequest chatRequest(String message) {
-    return new ChatRequest("case-1", null, "req-1", null, null, message);
+    return new ChatRequest(null, "req-1", null, message);
   }
 
   private static ChatProperties defaultChatProperties() {
@@ -353,7 +354,7 @@ class ChatOrchestrationServiceTest {
               Mono.just(CHUNK),
               Flux.error(
                   new MlAgentRejectedException(
-                      ErrorCode.NOT_FOUND, "case not found in that tenant")));
+                      ErrorCode.NOT_FOUND, "resource not found in that tenant")));
         };
     ChatOrchestrationService service =
         newService(
@@ -388,8 +389,8 @@ class ChatOrchestrationServiceTest {
                 .setToolCall(
                     ToolCall.newBuilder()
                         .setToolCallId("t-1")
-                        .setName("getCase")
-                        .setArgsJson("{\"caseId\":\"case-1\"}"))
+                        .setName("searchPolicies")
+                        .setArgsJson("{\"status\":\"ACTIVE\"}"))
                 .build(),
             AnswerEvent.newBuilder()
                 .setToolResult(
@@ -405,12 +406,15 @@ class ChatOrchestrationServiceTest {
             AnswerEvent.newBuilder()
                 .setPayload(
                     AnswerPayload.newBuilder()
-                        .setCaseManagerAnswerPayload(
-                            CaseManagerAnswerPayload.newBuilder()
+                        .setPolicyManagerAnswerPayload(
+                            PolicyManagerAnswerPayload.newBuilder()
                                 .addKeySignals(
-                                    CaseManagerAnswerPayload.KeySignal.newBuilder()
+                                    PolicyManagerAnswerPayload.KeySignal.newBuilder()
                                         .setSignal("s")
                                         .addCitations("c1"))))
+                .build(),
+            AnswerEvent.newBuilder()
+                .setGeneratedPolicy(GeneratedPolicy.newBuilder().setPolicyJson("{\"name\":\"p1\"}"))
                 .build(),
             AnswerEvent.newBuilder()
                 .setDone(
@@ -444,7 +448,15 @@ class ChatOrchestrationServiceTest {
     }
     assertThat(events)
         .extracting(ServerSentEvent::event)
-        .containsExactly("tool_call", "tool_result", "chunk", "ping", "chunk", "payload", "done");
+        .containsExactly(
+            "tool_call",
+            "tool_result",
+            "chunk",
+            "ping",
+            "chunk",
+            "payload",
+            "generated_policy",
+            "done");
   }
 
   @Test
@@ -486,7 +498,7 @@ class ChatOrchestrationServiceTest {
   }
 
   @Test
-  void backendFailure_isTheOnlyCaseThatProducesAServiceErrorEvent() {
+  void backendFailure_isTheOnlyFailureThatProducesAServiceErrorEvent() {
     MlAgentClient unreachable =
         request -> Flux.error(new MlAgentUnavailableException("connection refused"));
     ChatOrchestrationService service =
@@ -528,10 +540,8 @@ class ChatOrchestrationServiceTest {
             capturing);
     ChatRequest request =
         new ChatRequest(
-            "case-1",
             List.of(new HistoryTurn("user", "hi"), new HistoryTurn("assistant", "hello")),
             "req-1",
-            null,
             null,
             "hello");
 
@@ -545,7 +555,7 @@ class ChatOrchestrationServiceTest {
   }
 
   @Test
-  void operatorIdAndEndUserId_areForwardedFromTheRequestBody_neverFromContextUserId() {
+  void operatorId_isForwardedFromTheRequestBody_neverFromContextUserId() {
     AtomicReference<MlAgentRequest> captured = new AtomicReference<>();
     MlAgentClient capturing =
         request -> {
@@ -559,16 +569,15 @@ class ChatOrchestrationServiceTest {
             5,
             defaultChatProperties(),
             capturing);
-    ChatRequest request = new ChatRequest("case-1", null, "req-1", "end-user-9", "op-7", "hello");
+    ChatRequest request = new ChatRequest(null, "req-1", "op-7", "hello");
 
     service.streamMessage(context(), request).collectList().block(Duration.ofSeconds(5));
 
     assertThat(captured.get().operatorId()).isEqualTo("op-7");
-    assertThat(captured.get().endUserId()).isEqualTo("end-user-9");
   }
 
   @Test
-  void absentOperatorIdAndEndUserId_stayNull_evenWhenTheContextHasAUserId() {
+  void absentOperatorId_staysNull_evenWhenTheContextHasAUserId() {
     AtomicReference<MlAgentRequest> captured = new AtomicReference<>();
     MlAgentClient capturing =
         request -> {
@@ -583,14 +592,13 @@ class ChatOrchestrationServiceTest {
             defaultChatProperties(),
             capturing);
 
-    // context() carries userId "analyst-1" — it must not leak into either field.
+    // context() carries userId "analyst-1" — it must not leak into operatorId.
     service
         .streamMessage(context(), chatRequest("hello"))
         .collectList()
         .block(Duration.ofSeconds(5));
 
     assertThat(captured.get().operatorId()).isNull();
-    assertThat(captured.get().endUserId()).isNull();
   }
 
   @Test
@@ -609,7 +617,7 @@ class ChatOrchestrationServiceTest {
             defaultChatProperties(),
             capturing);
     RequestContext authenticated =
-        new RequestContext("tenant-1", "case-1", "org-1", "analyst-1", "corr-1", "token-1");
+        new RequestContext("tenant-1", "org-1", "analyst-1", "corr-1", "token-1");
 
     service
         .streamMessage(authenticated, chatRequest("hello"))

@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+// NOTE: the proto package is part of the wire contract (the gRPC method path is
+// /pmbotservice.mlagent.v1.ChatAgent/AskPolicyManager) and must match the ML Agent's.
+package pmbotservice.mlagent.v1;
+
+import "common.proto";
+
+option java_package = "com.pmbotservice.mlagent.grpc.v1";
+option java_multiple_files = true;
+
+// Policy Manager–specific request and payload types. A Policy Manager conversation is
+// plain to-and-fro question/answer.
+
+message AskPolicyManagerRequest {
+  AgentRequestContext request_context = 1;
+
+  // Identifier of the operator making the request.
+  string operator_id = 2;
+
+  // The user's message to be processed by the ML Agent.
+  string prompt = 3;
+
+  // Existing conversation transcript, when supplied by the caller.
+  repeated ConversationTurn history = 4;
+}
+
+// Structured response needing rendered UI components produced by the ML Agent.
+message PolicyManagerAnswerPayload {
+  message Citation {
+    // Referenced from KeySignal.citations.
+    string id = 1;
+
+    // Tool or source the evidence came from.
+    string source = 2;
+
+    // Field paths within the source.
+    repeated string fields = 3;
+  }
+
+  message KeySignal {
+    // Key signal identified by the ML Agent.
+    string signal = 1;
+
+    // Citation ids supporting the signal. Clients MUST tolerate ids that
+    // do not resolve to an entry in `citations`.
+    repeated string citations = 2;
+  }
+
+  // Structured representation of the ML Agent's response's key signals.
+  repeated KeySignal key_signals = 1;
+
+  // References supporting the ML Agent's response.
+  repeated Citation citations = 2;
+}
+
+// A newly generated policy, emitted when the user asked the ML Agent to create one.
+// Not terminal: text chunks may precede or follow it, and the stream still ends with
+// Done or Error. If the stream ends with Error, the client MUST discard the policy
+// along with the rest of the turn.
+message GeneratedPolicy {
+  // The generated policy document, serialized as JSON (same convention as
+  // ToolCall.args_json). Forwarded untouched; the client parses it.
+  string policy_json = 1;
+}

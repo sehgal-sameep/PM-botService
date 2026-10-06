@@ -17,9 +17,8 @@ import reactor.core.publisher.Mono;
  * logging, however many operator/ thread hops later (see {@link MdcContext}), without leaking into
  * any other request's context.
  *
- * <p>{@code tenantId}/{@code caseId} live in the request body (this service has no per-request URL
- * path segments to parse them from), so they're added to the same {@code Context} later, once the
- * body is deserialized — see {@code ChatOrchestrationService}.
+ * <p>{@code tenantId} is resolved later from the request headers and added to the same {@code
+ * Context} then — see {@code ChatOrchestrationService}.
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)

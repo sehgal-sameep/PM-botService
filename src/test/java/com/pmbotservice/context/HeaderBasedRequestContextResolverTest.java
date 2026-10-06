@@ -25,7 +25,7 @@ class HeaderBasedRequestContextResolverTest {
                 .header(RequestHeaders.TENANT_ID, "tenant-1")
                 .header(RequestHeaders.ORGANIZATION_ID, "org-1"));
 
-    assertThat(resolver.resolve(exchange, "case-1").organization()).isEqualTo("org-1");
+    assertThat(resolver.resolve(exchange).organization()).isEqualTo("org-1");
   }
 
   @Test
@@ -33,7 +33,7 @@ class HeaderBasedRequestContextResolverTest {
     MockServerWebExchange exchange =
         exchange(MockServerHttpRequest.post("/").header(RequestHeaders.TENANT_ID, "tenant-1"));
 
-    assertThat(resolver.resolve(exchange, "case-1").organization()).isNull();
+    assertThat(resolver.resolve(exchange).organization()).isNull();
   }
 
   @Test
@@ -44,7 +44,7 @@ class HeaderBasedRequestContextResolverTest {
                 .header(RequestHeaders.TENANT_ID, "tenant-1")
                 .header(RequestHeaders.ORGANIZATION_ID, "  "));
 
-    assertThat(resolver.resolve(exchange, "case-1").organization()).isNull();
+    assertThat(resolver.resolve(exchange).organization()).isNull();
   }
 
   @Test
@@ -52,7 +52,7 @@ class HeaderBasedRequestContextResolverTest {
     MockServerWebExchange exchange =
         exchange(MockServerHttpRequest.post("/").header(RequestHeaders.ORGANIZATION_ID, "org-1"));
 
-    assertThatThrownBy(() -> resolver.resolve(exchange, "case-1"))
+    assertThatThrownBy(() -> resolver.resolve(exchange))
         .isInstanceOf(ResponseStatusException.class);
   }
 }

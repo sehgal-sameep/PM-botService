@@ -98,29 +98,23 @@ public class ChatOrchestrationServiceImpl implements ChatOrchestrationService {
   @Override
   public Flux<ServerSentEvent<Object>> streamMessage(RequestContext context, ChatRequest request) {
     return Flux.defer(() -> doStreamMessage(context, request))
-        .contextWrite(
-            ctx -> {
-              ctx = ctx.put(MdcContext.TENANT_ID, context.tenantId());
-              // caseId is optional; Reactor Context rejects null values.
-              return context.caseId() == null ? ctx : ctx.put(MdcContext.CASE_ID, context.caseId());
-            });
+        .contextWrite(ctx -> ctx.put(MdcContext.TENANT_ID, context.tenantId()));
   }
 
   private Flux<ServerSentEvent<Object>> doStreamMessage(
       RequestContext context, ChatRequest request) {
     String messageId = UUID.randomUUID().toString();
-    // Identifiers and sizes only — the prompt and history are case free text that may
+    // Identifiers and sizes only — the prompt and history are free text that may
     // contain personal data, so their content is never logged (see LogSanitizer).
     log.info(
         "CHAT_REQUEST_RECEIVED messageId={} userId={} organization={} requestId={}"
-            + " messageLength={} historyTurns={} endUserIdPresent={} operatorIdPresent={}",
+            + " messageLength={} historyTurns={} operatorIdPresent={}",
         messageId,
         context.userId(),
         context.organization(),
         request.requestId() == null ? "<absent>" : request.requestId(),
         request.message().length(),
         request.history() == null ? 0 : request.history().size(),
-        request.endUserId() != null,
         request.operatorId() != null);
     metrics.connectionOpened();
 
@@ -191,11 +185,9 @@ public class ChatOrchestrationServiceImpl implements ChatOrchestrationService {
         new MlAgentRequest(
             context.tenantId(),
             context.organization(),
-            context.caseId(),
             toMlAgentHistory(request.history()),
             messageId,
             request.operatorId(),
-            request.endUserId(),
             context.correlationId(),
             request.requestId(),
             request.message(),
@@ -237,11 +229,10 @@ public class ChatOrchestrationServiceImpl implements ChatOrchestrationService {
     return Flux.defer(
             () -> {
               log.info(
-                  "ML_REQUEST_STARTED messageId={} client={} caseId={} firstResponseTimeoutMs={}"
+                  "ML_REQUEST_STARTED messageId={} client={} firstResponseTimeoutMs={}"
                       + " idleTimeoutMs={} maxStreamDurationMs={}",
                   messageId,
                   mlAgentClient.getClass().getSimpleName(),
-                  context.caseId(),
                   mlAgentProperties.firstResponseTimeout().toMillis(),
                   mlAgentProperties.idleTimeout().toMillis(),
                   chatProperties.maxStreamDuration().toMillis());
@@ -372,8 +363,13 @@ public class ChatOrchestrationServiceImpl implements ChatOrchestrationService {
               "ML_EVENT_PAYLOAD messageId={} payloadType={} keySignals={} citations={}",
               messageId,
               evt.getPayload().getPayloadCase(),
-              evt.getPayload().getCaseManagerAnswerPayload().getKeySignalsCount(),
-              evt.getPayload().getCaseManagerAnswerPayload().getCitationsCount());
+              evt.getPayload().getPolicyManagerAnswerPayload().getKeySignalsCount(),
+              evt.getPayload().getPolicyManagerAnswerPayload().getCitationsCount());
+      case GENERATED_POLICY ->
+          log.info(
+              "ML_EVENT_GENERATED_POLICY messageId={} policyJsonLength={}",
+              messageId,
+              evt.getGeneratedPolicy().getPolicyJson().length());
       case DONE ->
           log.info(
               "ML_EVENT_DONE messageId={} stopReason={} latencyMs={} tokensIn={} tokensOut={}",

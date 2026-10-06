@@ -17,6 +17,8 @@ public enum MockScenario {
   /** The agent's own in-stream {@code error} event (model-level), as opposed to {@link #ERROR}. */
   AGENT_ERROR("trigger:agent-error"),
   EMPTY("trigger:empty"),
+  /** A {@code generated_policy} event, as when the user asks the agent to create a policy. */
+  GENERATE_POLICY("trigger:generate-policy"),
   REJECTED("trigger:rejected");
 
   private final String keyword;

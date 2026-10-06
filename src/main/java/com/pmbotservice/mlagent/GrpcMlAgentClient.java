@@ -10,10 +10,10 @@ import com.pmbotservice.common.MlAgentUnavailableException;
 import com.pmbotservice.mlagent.grpc.v1.AgentRequestContext;
 import com.pmbotservice.mlagent.grpc.v1.AnswerEvent;
 import com.pmbotservice.mlagent.grpc.v1.AnswerPayload;
-import com.pmbotservice.mlagent.grpc.v1.AskCaseManagerRequest;
-import com.pmbotservice.mlagent.grpc.v1.CaseManagerAnswerPayload;
+import com.pmbotservice.mlagent.grpc.v1.AskPolicyManagerRequest;
 import com.pmbotservice.mlagent.grpc.v1.ChatAgentGrpc;
 import com.pmbotservice.mlagent.grpc.v1.ConversationTurn;
+import com.pmbotservice.mlagent.grpc.v1.PolicyManagerAnswerPayload;
 import io.grpc.Status;
 import io.grpc.stub.ClientCallStreamObserver;
 import io.grpc.stub.ClientResponseObserver;
@@ -26,12 +26,12 @@ import reactor.core.publisher.FluxSink;
 
 /**
  * Real {@link MlAgentClient} implementation: calls Thoughtful Labs' ML Agent over gRPC's
- * server-streaming {@code ChatAgent.AskCaseManager} RPC (see {@code
+ * server-streaming {@code ChatAgent.AskPolicyManager} RPC (see {@code
  * src/main/proto/chat_agent.proto}) and relays its {@link AnswerEvent}s exactly as received — every
  * event type (<code>chunk</code>, <code>tool_call</code>, <code>tool_result</code>, <code>payload
- * </code>, <code>done</code>, <code>error</code>, <code>ping</code>) and every field, with no
- * translation into a backend-owned model. Never buffers the response — no {@code
- * collectList()}/{@code .block()}, just a straight {@code Flux}.
+ * </code>, <code>done</code>, <code>error</code>, <code>ping</code>, <code>generated_policy</code>)
+ * and every field, with no translation into a backend-owned model. Never buffers the response — no
+ * {@code collectList()}/{@code .block()}, just a straight {@code Flux}.
  *
  * <p>The only event ever withheld is one whose {@code event} oneof is unset — an arm this build's
  * generated code doesn't know yet, or an empty message. Per the contract, "Clients MUST ignore
@@ -78,12 +78,12 @@ public class GrpcMlAgentClient implements MlAgentClient {
 
   @Override
   public Flux<AnswerEvent> streamResponse(MlAgentRequest request) {
-    AskCaseManagerRequest protoRequest = toProtoRequest(request);
+    AskPolicyManagerRequest protoRequest = toProtoRequest(request);
     return Flux.defer(
             () -> {
               boolean accessTokenPresent = hasText(request.accessToken());
               log.info(
-                  "GRPC_CALL_STARTED messageId={} rpc=ChatAgent/AskCaseManager target={}"
+                  "GRPC_CALL_STARTED messageId={} rpc=ChatAgent/AskPolicyManager target={}"
                       + " historyTurns={} promptLength={} accessTokenPresent={}",
                   request.messageId(),
                   chatAgentStub.getChannel().authority(),
@@ -116,23 +116,23 @@ public class GrpcMlAgentClient implements MlAgentClient {
 
   /**
    * Bridges grpc-java's callback-based async stub into a cold, backpressure-respecting {@code
-   * Flux}: nothing is sent to the wire until subscribed ({@code stub.askCaseManager(...)} runs
+   * Flux}: nothing is sent to the wire until subscribed ({@code stub.askPolicyManager(...)} runs
    * inside the {@code Flux.create} lambda), downstream demand is translated into {@code
    * ClientCallStreamObserver#request(int)} calls, and cancellation (a client disconnect propagating
    * down from {@code ChatOrchestrationService}) calls {@code ClientCallStreamObserver#cancel(...)}
    * to actually stop the server-side call.
    */
   private static Flux<AnswerEvent> grpcEventFlux(
-      ChatAgentGrpc.ChatAgentStub stub, AskCaseManagerRequest protoRequest) {
+      ChatAgentGrpc.ChatAgentStub stub, AskPolicyManagerRequest protoRequest) {
     return Flux.create(
         sink -> {
-          AtomicReference<ClientCallStreamObserver<AskCaseManagerRequest>> callStreamRef =
+          AtomicReference<ClientCallStreamObserver<AskPolicyManagerRequest>> callStreamRef =
               new AtomicReference<>();
-          ClientResponseObserver<AskCaseManagerRequest, AnswerEvent> observer =
+          ClientResponseObserver<AskPolicyManagerRequest, AnswerEvent> observer =
               new ClientResponseObserver<>() {
                 @Override
                 public void beforeStart(
-                    ClientCallStreamObserver<AskCaseManagerRequest> callStream) {
+                    ClientCallStreamObserver<AskPolicyManagerRequest> callStream) {
                   // Only disable auto flow control and stash the reference here — grpc-java
                   // forbids calling request()/cancel() before the call has actually started,
                   // and beforeStart() runs synchronously *before* start(). Wiring sink.onRequest
@@ -166,11 +166,11 @@ public class GrpcMlAgentClient implements MlAgentClient {
                   sink.complete();
                 }
               };
-          stub.askCaseManager(protoRequest, observer);
-          // stub.askCaseManager(...) has now returned, meaning start() has already run
+          stub.askPolicyManager(protoRequest, observer);
+          // stub.askPolicyManager(...) has now returned, meaning start() has already run
           // (grpc-java calls it synchronously as part of this method) — request()/cancel() are
           // safe from here on.
-          ClientCallStreamObserver<AskCaseManagerRequest> callStream = callStreamRef.get();
+          ClientCallStreamObserver<AskPolicyManagerRequest> callStream = callStreamRef.get();
           sink.onRequest(
               n -> callStream.request(n >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) n));
           sink.onCancel(() -> callStream.cancel("Downstream cancelled", null));
@@ -193,18 +193,24 @@ public class GrpcMlAgentClient implements MlAgentClient {
     if (event.getEventCase() == AnswerEvent.EventCase.PAYLOAD) {
       warnOnPayloadContractViolations(event.getPayload());
     }
+    if (event.getEventCase() == AnswerEvent.EventCase.GENERATED_POLICY
+        && event.getGeneratedPolicy().getPolicyJson().isBlank()) {
+      log.warn(
+          "GRPC_GENERATED_POLICY_CONTRACT_VIOLATION reason=generated_policy with empty policy_json"
+              + " — forwarding as-is");
+    }
     return true;
   }
 
   private static void warnOnPayloadContractViolations(AnswerPayload payload) {
-    if (payload.getPayloadCase() != AnswerPayload.PayloadCase.CASE_MANAGER_ANSWER_PAYLOAD) {
+    if (payload.getPayloadCase() != AnswerPayload.PayloadCase.POLICY_MANAGER_ANSWER_PAYLOAD) {
       log.warn(
           "GRPC_PAYLOAD_CONTRACT_VIOLATION reason=no recognised payload arm set — forwarding"
               + " as-is");
       return;
     }
-    for (CaseManagerAnswerPayload.KeySignal signal :
-        payload.getCaseManagerAnswerPayload().getKeySignalsList()) {
+    for (PolicyManagerAnswerPayload.KeySignal signal :
+        payload.getPolicyManagerAnswerPayload().getKeySignalsList()) {
       if (signal.getCitationsCount() == 0) {
         log.warn(
             "GRPC_PAYLOAD_CONTRACT_VIOLATION reason=key signal without a citation — forwarding"
@@ -239,7 +245,8 @@ public class GrpcMlAgentClient implements MlAgentClient {
           new MlAgentRejectedException(
               ErrorCode.INTERNAL_ERROR, "The ML Agent rejected our credentials or tenant access");
       case NOT_FOUND ->
-          new MlAgentRejectedException(ErrorCode.NOT_FOUND, "Case not found in that tenant");
+          new MlAgentRejectedException(
+              ErrorCode.NOT_FOUND, "Requested resource not found in that tenant");
       case INVALID_ARGUMENT ->
           new MlAgentRejectedException(
               ErrorCode.VALIDATION_ERROR, "Malformed request or missing required context");
@@ -249,11 +256,11 @@ public class GrpcMlAgentClient implements MlAgentClient {
   }
 
   /**
-   * The exact {@code AskCaseManagerRequest} put on the wire, as proto3 JSON with the original
+   * The exact {@code AskPolicyManagerRequest} put on the wire, as proto3 JSON with the original
    * {@code .proto} field names and default-valued fields included, so the log shows every key sent.
    * The access token is never part of this message (it travels as call metadata).
    */
-  private static String toJson(AskCaseManagerRequest protoRequest) {
+  private static String toJson(AskPolicyManagerRequest protoRequest) {
     try {
       return REQUEST_PRINTER.print(protoRequest);
     } catch (InvalidProtocolBufferException ex) {
@@ -265,7 +272,7 @@ public class GrpcMlAgentClient implements MlAgentClient {
     return value != null && !value.isBlank();
   }
 
-  private static AskCaseManagerRequest toProtoRequest(MlAgentRequest request) {
+  private static AskPolicyManagerRequest toProtoRequest(MlAgentRequest request) {
     AgentRequestContext requestContext =
         AgentRequestContext.newBuilder()
             .setTenant(request.tenantId())
@@ -274,18 +281,10 @@ public class GrpcMlAgentClient implements MlAgentClient {
             .setRequestId(request.correlationId() == null ? "" : request.correlationId())
             .build();
 
-    AskCaseManagerRequest.CaseContext.Builder caseContext =
-        AskCaseManagerRequest.CaseContext.newBuilder()
-            .setCaseId(request.caseId() == null ? "" : request.caseId());
-    if (request.endUserId() != null) {
-      caseContext.setEndUserId(request.endUserId());
-    }
-
-    AskCaseManagerRequest.Builder builder =
-        AskCaseManagerRequest.newBuilder()
+    AskPolicyManagerRequest.Builder builder =
+        AskPolicyManagerRequest.newBuilder()
             .setRequestContext(requestContext)
-            .setPrompt(request.message())
-            .setCaseContext(caseContext.build());
+            .setPrompt(request.message());
     if (request.operatorId() != null) {
       builder.setOperatorId(request.operatorId());
     }

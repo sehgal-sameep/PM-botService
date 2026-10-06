@@ -30,12 +30,13 @@ It's a pass-through proxy, not a translator, a database, or a session manager. E
 |---|---|
 | `tenantId` | Which customer this request belongs to. Sent as the `X-Tenant-Id` request header, not a body field. |
 | `organization` | Which organization within that tenant this request belongs to. Sent as the optional `X-Org-Id` request header. |
-| `caseId` | Which fraud case the analyst is chatting about. |
 | `history` | The full conversation transcript so far, oldest turn first. This is the **only** way to continue a conversation — the ML Agent's contract has no session/continuation token at all. Resend the growing transcript on every follow-up message. |
 | `messageId` | A unique ID this backend generates per message, for tracing in logs. Not something the frontend sends; only appears in a `service_error` event (§6). |
 | `requestId` | Optional, frontend-generated. Purely for your own tracing/support tickets — this backend logs it but doesn't use it for anything else. |
-| `endUserId` | Optional hint about who the message is really about/for. Forwarded to the ML Agent's case context as-is, only if the frontend sends it; this backend never interprets, defaults, or fills it from anything else. |
-| `operatorId` | Optional identifier of the operator making the request. Forwarded to the ML Agent as-is, only if the frontend sends it in the body; never defaulted, and never taken from `X-User-Id`, the BFF session, or `endUserId`. |
+| `operatorId` | Optional identifier of the operator making the request. Forwarded to the ML Agent as-is, only if the frontend sends it in the body; never defaulted, and never taken from `X-User-Id` or the BFF session. |
+
+A Policy Manager conversation is plain question/answer: ask about policies, or ask
+the agent to generate a new one.
 
 ## 3. Step 1 — What the frontend sends to this backend
 
@@ -65,23 +66,22 @@ Accept: text/event-stream
 
 ```json
 {
-  "caseId": "case-1001",
   "history": [],
   "requestId": "req-a1b2c3",
-  "endUserId": null,
   "operatorId": "analyst-1",
-  "message": "Summarize this case for me"
+  "message": "Which policies are currently active?"
 }
 ```
 
 | Field | Required? | Notes |
 |---|---|---|
-| `caseId` | **Yes** | Letters, digits, `_`, `-` only. Max 100 chars. |
 | `history` | No | Omit (or send an empty array) to start a brand-new conversation. Otherwise, resend the full transcript so far — see §7. Each turn is `{ "role": "user"|"assistant", "content": "..." }`; at most 50 turns. `content` is optional and may be omitted, `null`, empty, or blank. |
 | `requestId` | No | Your own tracking ID, for your logs only. |
-| `endUserId` | No | Forwarded to the ML Agent as-is, only if sent; not interpreted by this backend. |
-| `operatorId` | No | Forwarded to the ML Agent as-is, only if sent; never defaulted or filled from `X-User-Id`/`endUserId`. Max 200 chars. |
-| `message` | **Yes** | The analyst's question/prompt. Max 4000 characters. |
+| `operatorId` | No | Forwarded to the ML Agent as-is, only if sent; never defaulted or filled from `X-User-Id`. Max 200 chars. |
+| `message` | **Yes** | The user's question about policies, or a request to generate a new policy. Max 4000 characters. |
+
+Unknown body fields are ignored,
+not rejected — they are simply never forwarded.
 
 **That's it — this is the entire contract the frontend needs to know.** §4 happens
 inside this backend and is invisible to the frontend. §5–§6 describe what you receive,
@@ -103,11 +103,7 @@ mapping if something looks wrong end-to-end:
     "requestId": "<this backend's own correlation id>"
   },
   "operatorId": "analyst-1",
-  "prompt": "Summarize this case for me",
-  "caseContext": {
-    "caseId": "case-1001",
-    "endUserId": null
-  },
+  "prompt": "Which policies are currently active?",
   "history": []
 }
 ```
@@ -118,22 +114,23 @@ mapping if something looks wrong end-to-end:
 | `X-Org-Id` (header) | `requestContext.organization` | Only if you send it — left unset otherwise. Passed straight through — not looked up or validated against anything server-side. |
 | `requestId` | `requestContext.agentSessionId` | Reused as the closest thing this backend has to a request-grouping id; blank if you didn't send one. |
 | — | `requestContext.requestId` | This backend's own internal correlation id (from `X-Correlation-Id` or generated) — **not** your `requestId` field, despite the similar name. |
-| `operatorId` | `operatorId` | Only if you send it — left unset otherwise. Never filled from `X-User-Id` or `endUserId`. |
+| `operatorId` | `operatorId` | Only if you send it — left unset otherwise. Never filled from `X-User-Id`. |
 | `message` | `prompt` | Untouched. |
-| `caseId` | `caseContext.caseId` | Nested. |
-| `endUserId` | `caseContext.endUserId` | Nested. Only if you send it — left unset otherwise. |
 | `history` | `history` | Each `{role, content}` turn becomes a `user`/`agent` turn in the ML Agent's own shape — `role: "user"` maps to a user turn, anything else to an agent turn. |
 
 Fields that **never** leave this backend: `X-Correlation-Id` (goes out as
 `requestContext.requestId`, not literally the header value's name), `messageId`,
 `X-User-Id`. Those
-exist purely for this backend's own logging/tracing — `correlationId`/`tenantId`/
-`caseId` are already enough to trace one chatbot interaction end to end.
+exist purely for this backend's own logging/tracing — `correlationId`/`tenantId` are
+already enough to trace one chatbot interaction end to end.
+
+(The request message on the wire is `AskPolicyManagerRequest`, sent to the
+`ChatAgent.AskPolicyManager` RPC — see `src/main/proto/policy_manager.proto`.)
 
 ## 5. Step 3 — What the ML Agent streams back
 
 The ML Agent responds with a live stream of `AnswerEvent` messages over gRPC
-(`src/main/proto/chat_agent.proto`). Each one has exactly one of seven event types set:
+(`src/main/proto/chat_agent.proto`). Each one has exactly one of eight event types set:
 
 | Event | Meaning | How many? |
 |---|---|---|
@@ -142,6 +139,7 @@ The ML Agent responds with a live stream of `AnswerEvent` messages over gRPC
 | `tool_result` | The result of that tool invocation (`tool_call_id` matches its `tool_call`) | One per `tool_call` |
 | `ping` | A pure keepalive, no content | 0 or more |
 | `payload` | The structured, cited analysis for the UI to render | May arrive at any point |
+| `generated_policy` | A newly generated policy (as a JSON string), when the user asked the agent to create one. Not terminal | 0 or more; chunks may come before/after it |
 | `done` | "I'm finished" — terminal, the answer is valid | One, last, on success |
 | `error` | A model-level failure — terminal, no usable answer | Instead of `done` |
 
@@ -150,7 +148,7 @@ this backend passes them straight through: consecutive `chunk` events form one t
 block, any other event closes it; clients must treat an unrecognised `tool_result.status`
 as `STATUS_FAILED` and an unrecognised `error.code` as `ERROR_CODE_INTERNAL`; clients
 must ignore event types they don't recognise; after an `error`, discard the chunks
-already received and don't persist the turn.
+(and any `generated_policy`) already received and don't persist the turn.
 
 ## 6. Step 4 — What this backend streams back to the frontend
 
@@ -160,7 +158,7 @@ events or fields, reshape payloads, drop fields, or add its own wrapper. Each
 
 | SSE line | Value |
 |---|---|
-| `event:` | The ML Agent's own event type name — `chunk`, `tool_call`, `tool_result`, `payload`, `done`, `error`, `ping` |
+| `event:` | The ML Agent's own event type name — `chunk`, `tool_call`, `tool_result`, `payload`, `generated_policy`, `done`, `error`, `ping` |
 | `data:` | The whole `AnswerEvent`, as standard protobuf JSON ([proto3 JSON mapping](https://protobuf.dev/programming-guides/json/)) with the **original `.proto` field names** (`tool_call_id`, `args_json`, `stop_reason`, …) and the original nesting |
 | `id:` | A frame counter (0, 1, 2, …) — the only thing this backend adds, and only as SSE transport metadata |
 
@@ -168,10 +166,11 @@ What that JSON looks like for each event type:
 
 | `event:` | `data:` |
 |---|---|
-| `chunk` | `{"chunk":{"delta":"This case was..."}}` |
-| `tool_call` | `{"tool_call":{"tool_call_id":"t-1","name":"getCase","args_json":"{\"caseId\":\"case-1001\"}"}}` |
-| `tool_result` | `{"tool_result":{"tool_call_id":"t-1","status":"STATUS_OK","ms":"42","row_count":"7"}}` |
-| `payload` | `{"payload":{"case_manager_answer_payload":{"key_signals":[{"signal":"Unusual device/IP","citations":["evt-123"]}],"citations":[{"id":"evt-123","source":"getCase","fields":["risk_score"]}]}}}` |
+| `chunk` | `{"chunk":{"delta":"The active policy set contains..."}}` |
+| `tool_call` | `{"tool_call":{"tool_call_id":"t-1","name":"searchPolicies","args_json":"{\"status\":\"ACTIVE\"}"}}` |
+| `tool_result` | `{"tool_result":{"tool_call_id":"t-1","status":"STATUS_OK","ms":"42","row_count":"3"}}` |
+| `payload` | `{"payload":{"policy_manager_answer_payload":{"key_signals":[{"signal":"Velocity policy is active","citations":["pol-2"]}],"citations":[{"id":"pol-2","source":"searchPolicies","fields":["policies[1].rules"]}]}}}` |
+| `generated_policy` | `{"generated_policy":{"policy_json":"{\"name\":\"New beneficiary high-value transfer\",\"enabled\":false}"}}` |
 | `done` | `{"done":{"stop_reason":"STOP_REASON_COMPLETED","latency_ms":"1800","tokens_in":"12","tokens_out":"140"}}` |
 | `error` | `{"error":{"code":"ERROR_CODE_MODEL_REFUSED","retryable":false}}` |
 | `ping` | `{"ping":{}}` |
@@ -192,6 +191,14 @@ Three things about that JSON format that frontend code needs to handle:
 
 `args_json` is itself a JSON string — the tool's arguments exactly as the agent
 serialized them. Parse it separately if you need it.
+
+### `generated_policy`
+
+Sent when the user asks the agent to generate (create) a new policy. `policy_json` is
+the whole policy document **as a JSON string**, forwarded untouched — the frontend must
+`JSON.parse(data.generated_policy.policy_json)` to get the object. It is **not**
+terminal: text `chunk`s may arrive before and/or after it, and the stream still ends
+with `done` (keep the policy) or `error` (discard it along with the rest of the turn).
 
 The only event the ML Agent sends that you won't see is one with **no** event type set
 (an empty message, or a type newer than this backend's copy of the `.proto`). The
@@ -223,27 +230,27 @@ Every stream ends with exactly one of `done`, `error`, or `service_error`.
 curl -N -X POST http://localhost:8079/back-office-ai/pm/api/v1/chat/messages \
   -H "Content-Type: application/json" -H "Accept: text/event-stream" \
   -H "X-Tenant-Id: tenant-42" -H "X-Org-Id: org-7" \
-  -d '{"caseId":"case-1001","message":"Summarize this case for me"}'
+  -d '{"message":"Which policies are currently active?"}'
 ```
 
 ```
 id:0
 event:tool_call
-data:{"tool_call":{"tool_call_id":"t-1","name":"getCase","args_json":"{\"caseId\":\"case-1001\"}"}}
+data:{"tool_call":{"tool_call_id":"t-1","name":"searchPolicies","args_json":"{\"status\":\"ACTIVE\"}"}}
 
 id:1
 event:tool_result
-data:{"tool_result":{"tool_call_id":"t-1","status":"STATUS_OK","ms":"42","row_count":"7"}}
+data:{"tool_result":{"tool_call_id":"t-1","status":"STATUS_OK","ms":"42","row_count":"3"}}
 
 id:2
 event:chunk
-data:{"chunk":{"delta":"This case was created because..."}}
+data:{"chunk":{"delta":"The active policy set contains three transaction-monitoring policies."}}
 
 ... more "chunk" events (and possibly "ping") ...
 
 id:7
 event:payload
-data:{"payload":{"case_manager_answer_payload":{"key_signals":[...],"citations":[...]}}}
+data:{"payload":{"policy_manager_answer_payload":{"key_signals":[...],"citations":[...]}}}
 
 id:8
 event:done
@@ -261,7 +268,8 @@ onmessage(msg) {
     case "chunk":         appendText(data.chunk.delta); break;
     case "tool_call":     showTool(data.tool_call.tool_call_id, data.tool_call.name); break;
     case "tool_result":   finishTool(data.tool_result.tool_call_id, data.tool_result.status); break;
-    case "payload":       renderSignals(data.payload.case_manager_answer_payload); break;
+    case "payload":       renderSignals(data.payload.policy_manager_answer_payload); break;
+    case "generated_policy": showPolicy(JSON.parse(data.generated_policy.policy_json)); break;
     case "done":          finish(data.done.stop_reason === "STOP_REASON_TRUNCATED"); break;
     case "error":         failModel(data.error.code, data.error.retryable); break;
     case "service_error": failService(data.errorCode, data.errorMessage); break;
@@ -280,19 +288,31 @@ for you.
 curl -N -X POST http://localhost:8079/back-office-ai/pm/api/v1/chat/messages \
   -H "Content-Type: application/json" -H "Accept: text/event-stream" \
   -H "X-Tenant-Id: tenant-42" -H "X-Org-Id: org-7" \
-  -d '{"caseId":"case-1001","history":[{"role":"user","content":"Summarize this case for me"},{"role":"assistant","content":"This case was..."}],"message":"Which rules were triggered?"}'
+  -d '{"history":[{"role":"user","content":"Which policies are currently active?"},{"role":"assistant","content":"The active policy set contains..."}],"message":"Generate a policy that flags high-value transfers to new beneficiaries"}'
 ```
 
-Same event sequence as Turn 1 — there's no id to echo back or compare; `history`
-carrying the prior turn is what makes this a continuation rather than a fresh
-conversation.
+There's no id to echo back or compare; `history` carrying the prior turn is what makes
+this a continuation rather than a fresh conversation. Because this turn asks for a new
+policy, the stream carries a `generated_policy` event instead of a `payload`:
+
+```
+... tool_call / tool_result / chunk events, as in Turn 1 ...
+
+id:6
+event:generated_policy
+data:{"generated_policy":{"policy_json":"{\"name\":\"New beneficiary high-value transfer\",\"enabled\":false,...}"}}
+
+id:7
+event:done
+data:{"done":{"stop_reason":"STOP_REASON_COMPLETED","latency_ms":"1500","tokens_in":"20","tokens_out":"180"}}
+```
 
 ## 8. When things go wrong
 
 Once streaming has started, this backend never returns an HTTP error status, so the
 frontend should always watch for the two terminal failure events rather than expecting
 an HTTP status code mid-stream. (A request that's invalid up front, such as a missing
-`X-Tenant-Id` or `caseId`, is still rejected with a plain HTTP `400`, before any SSE.)
+`X-Tenant-Id` or a blank `message`, is still rejected with a plain HTTP `400`, before any SSE.)
 
 **`error` — the ML Agent's own model-level failure**, forwarded exactly as sent:
 
@@ -311,7 +331,7 @@ directly.
 | `errorCode` | What happened | Should the frontend retry? |
 |---|---|---|
 | `VALIDATION_ERROR` | The message exceeded the runtime length limit | No — fix the request |
-| `NOT_FOUND` | The agent rejected the call: case not found for that tenant | No |
+| `NOT_FOUND` | The agent rejected the call: requested resource not found in that tenant | No |
 | `ML_AGENT_TIMEOUT` | The ML Agent took too long to respond | Maybe, after a pause |
 | `ML_AGENT_UNAVAILABLE` | This backend couldn't reach the ML Agent at all | Maybe, after a pause |
 | `ML_AGENT_ERROR` | The ML Agent call failed at the transport level | Maybe, after a pause |
@@ -338,9 +358,12 @@ behaviors by including these keywords anywhere in your `message` text:
 | `trigger:agent-error` | The agent's own `error` event → `error` `{"code":"ERROR_CODE_DATA_UNAVAILABLE","retryable":true}` |
 | `trigger:empty` | A valid but empty response: just `done` (no `chunk`/`payload`) |
 | `trigger:rejected` | The agent rejects the request → `service_error` `NOT_FOUND` |
+| `trigger:generate-policy` | A policy-generation answer: `tool_call`/`tool_result`, `chunk`s, a `generated_policy` with a sample policy JSON, then `done` |
 
-Any other text gets a canned, realistic-looking fraud-case answer: a
-`tool_call`/`tool_result` pair, `chunk`s, a `payload` with citations, then `done`. That
+Any message containing "generate" or "create" together with "policy" (e.g. "Create a
+policy for ...") gets that same generated-policy flow. Any other text gets a canned,
+realistic-looking policy answer: a `searchPolicies` `tool_call`/`tool_result` pair,
+`chunk`s, a `payload` with citations, then `done`. That
 makes the full contract (§5–§6) testable end-to-end without waiting on the real ML
 Agent integration.
 
@@ -351,13 +374,13 @@ FRONTEND SENDS               THIS BACKEND FORWARDS              ML AGENT RETURNS
 ─────────────────            ────────────────────────────       ─────────────────       ─────────────────────────────
 X-Tenant-Id (header)  ───▶  requestContext.tenant               chunk              ═══▶  event:chunk        {"chunk":{...}}
 X-Org-Id (header)     ───▶  requestContext.organization         tool_call          ═══▶  event:tool_call    {"tool_call":{...}}
-caseId                ───▶  caseContext.caseId                  tool_result        ═══▶  event:tool_result  {"tool_result":{...}}
-endUserId             ───▶  caseContext.endUserId               payload            ═══▶  event:payload      {"payload":{...}}
-history               ───▶  history (role/content ─▶ user/agent) done              ═══▶  event:done         {"done":{...}}
-message               ───▶  prompt                              error              ═══▶  event:error        {"error":{...}}
-operatorId            ───▶  operatorId                          ping               ═══▶  event:ping         {"ping":{}}
-requestId             ───▶  requestContext.agentSessionId
-X-Correlation-Id      ───▶  requestContext.requestId            (no agent event)   ───▶  event:service_error (this backend's own)
+history               ───▶  history (role/content ─▶ user/agent) tool_result       ═══▶  event:tool_result  {"tool_result":{...}}
+message               ───▶  prompt                              payload            ═══▶  event:payload      {"payload":{...}}
+operatorId            ───▶  operatorId                          generated_policy   ═══▶  event:generated_policy {"generated_policy":{...}}
+requestId             ───▶  requestContext.agentSessionId       done               ═══▶  event:done         {"done":{...}}
+X-Correlation-Id      ───▶  requestContext.requestId            error              ═══▶  event:error        {"error":{...}}
+                                                                ping               ═══▶  event:ping         {"ping":{}}
+                                                                (no agent event)   ───▶  event:service_error (this backend's own)
 ```
 
 The request side (left) is still mapped into the ML Agent's gRPC request shape. The

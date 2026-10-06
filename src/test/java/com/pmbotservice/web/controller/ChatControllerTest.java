@@ -52,7 +52,7 @@ class ChatControllerTest {
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
         .accept(MediaType.TEXT_EVENT_STREAM)
-        .body(Map.of("caseId", "case-1", "message", "Summarize this case for me"))
+        .body(Map.of("message", "Give me an overview of the active policies"))
         .exchange()
         .expectStatus()
         .isOk()
@@ -89,7 +89,7 @@ class ChatControllerTest {
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
         .accept(MediaType.TEXT_EVENT_STREAM)
-        .body(Map.of("caseId", "case-1", "message", "Summarize this case for me"))
+        .body(Map.of("message", "Give me an overview of the active policies"))
         .exchange()
         .expectStatus()
         .isOk()
@@ -105,7 +105,7 @@ class ChatControllerTest {
                       "\"status\":\"STATUS_OK\"",
                       "\"row_count\":",
                       "data:{\"chunk\":{\"delta\":",
-                      "data:{\"payload\":{\"case_manager_answer_payload\":{\"key_signals\":",
+                      "data:{\"payload\":{\"policy_manager_answer_payload\":{\"key_signals\":",
                       "data:{\"done\":{\"stop_reason\":\"STOP_REASON_COMPLETED\"",
                       "\"latency_ms\":",
                       "\"tokens_in\":",
@@ -141,12 +141,12 @@ class ChatControllerTest {
         .accept(MediaType.TEXT_EVENT_STREAM)
         .body(
             Map.of(
-                "caseId", "case-1",
                 "history",
-                    java.util.List.of(
-                        Map.of("role", "user", "content", "Summarize this case for me"),
-                        Map.of("role", "assistant", "content", "Here's a summary...")),
-                "message", "Which rules were triggered?"))
+                java.util.List.of(
+                    Map.of("role", "user", "content", "List the active policies"),
+                    Map.of("role", "assistant", "content", "Here's a summary...")),
+                "message",
+                "Which rules make up the velocity policy?"))
         .exchange()
         .expectStatus()
         .isOk()
@@ -169,14 +169,14 @@ class ChatControllerTest {
         .accept(MediaType.TEXT_EVENT_STREAM)
         .body(
             Map.of(
-                "caseId", "case-1",
                 "history",
-                    java.util.List.of(
-                        Map.of("role", "user"),
-                        nullContent,
-                        Map.of("role", "user", "content", ""),
-                        Map.of("role", "assistant", "content", "   ")),
-                "message", "Which rules were triggered?"))
+                java.util.List.of(
+                    Map.of("role", "user"),
+                    nullContent,
+                    Map.of("role", "user", "content", ""),
+                    Map.of("role", "assistant", "content", "   ")),
+                "message",
+                "Which rules make up the velocity policy?"))
         .exchange()
         .expectStatus()
         .isOk()
@@ -192,7 +192,7 @@ class ChatControllerTest {
         .header(RequestHeaders.TENANT_ID, "tenant-1")
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
-        .body(Map.of("caseId", "case-1", "message", ""))
+        .body(Map.of("message", ""))
         .exchange()
         .expectStatus()
         .isBadRequest()
@@ -202,48 +202,41 @@ class ChatControllerTest {
   }
 
   @Test
-  void missingCaseId_isAccepted() {
+  void generatePolicyRequest_streamsAGeneratedPolicyEvent() {
     restTestClient
         .post()
         .uri("/back-office-ai/pm/api/v1/chat/messages")
         .header(RequestHeaders.TENANT_ID, "tenant-1")
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
-        .body(Map.of("message", "hello"))
+        .accept(MediaType.TEXT_EVENT_STREAM)
+        .body(Map.of("message", "Generate a policy for transfers to new beneficiaries"))
         .exchange()
         .expectStatus()
-        .isOk();
+        .isOk()
+        .expectBody(String.class)
+        .value(
+            body ->
+                assertThat(body)
+                    .contains(
+                        "event:generated_policy",
+                        "data:{\"generated_policy\":{\"policy_json\":",
+                        "event:done")
+                    .doesNotContain("event:payload"));
   }
 
   @Test
-  void blankCaseId_isAccepted() {
+  void unknownBodyField_isIgnored() {
     restTestClient
         .post()
         .uri("/back-office-ai/pm/api/v1/chat/messages")
         .header(RequestHeaders.TENANT_ID, "tenant-1")
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
-        .body(Map.of("caseId", "  ", "message", "hello"))
+        .body(Map.of("unknownField", "bad value!", "message", "hello"))
         .exchange()
         .expectStatus()
         .isOk();
-  }
-
-  @Test
-  void invalidCaseId_returns400ValidationError() {
-    restTestClient
-        .post()
-        .uri("/back-office-ai/pm/api/v1/chat/messages")
-        .header(RequestHeaders.TENANT_ID, "tenant-1")
-        .header(RequestHeaders.ORGANIZATION_ID, "org-1")
-        .contentType(MediaType.APPLICATION_JSON)
-        .body(Map.of("caseId", "bad id!", "message", "hello"))
-        .exchange()
-        .expectStatus()
-        .isBadRequest()
-        .expectBody()
-        .jsonPath("$.errorCode")
-        .isEqualTo("VALIDATION_ERROR");
   }
 
   @Test
@@ -253,7 +246,7 @@ class ChatControllerTest {
         .uri("/back-office-ai/pm/api/v1/chat/messages")
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
-        .body(Map.of("caseId", "case-1", "message", "hello"))
+        .body(Map.of("message", "hello"))
         .exchange()
         .expectStatus()
         .isBadRequest()
@@ -269,7 +262,7 @@ class ChatControllerTest {
         .uri("/back-office-ai/pm/api/v1/chat/messages")
         .header(RequestHeaders.TENANT_ID, "tenant-1")
         .contentType(MediaType.APPLICATION_JSON)
-        .body(Map.of("caseId", "case-1", "message", "hello"))
+        .body(Map.of("message", "hello"))
         .exchange()
         .expectStatus()
         .isOk();
@@ -284,7 +277,7 @@ class ChatControllerTest {
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
         .accept(MediaType.TEXT_EVENT_STREAM)
-        .body(Map.of("caseId", "case-1", "message", "trigger:error"))
+        .body(Map.of("message", "trigger:error"))
         .exchange()
         .expectStatus()
         .isOk()
@@ -305,7 +298,7 @@ class ChatControllerTest {
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
         .accept(MediaType.TEXT_EVENT_STREAM)
-        .body(Map.of("caseId", "case-1", "message", "trigger:agent-error"))
+        .body(Map.of("message", "trigger:agent-error"))
         .exchange()
         .expectStatus()
         .isOk()
@@ -329,7 +322,7 @@ class ChatControllerTest {
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
         .accept(MediaType.TEXT_EVENT_STREAM)
-        .body(Map.of("caseId", "case-1", "message", "trigger:empty"))
+        .body(Map.of("message", "trigger:empty"))
         .exchange()
         .expectStatus()
         .isOk()

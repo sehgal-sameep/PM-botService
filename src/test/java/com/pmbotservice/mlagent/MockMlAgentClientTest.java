@@ -19,26 +19,17 @@ class MockMlAgentClientTest {
 
   private MlAgentRequest request(String message) {
     return new MlAgentRequest(
-        "tenant-1",
-        "org-1",
-        "case-1",
-        List.of(),
-        "msg-1",
-        "analyst-1",
-        null,
-        "corr-1",
-        "req-1",
-        message,
-        null);
+        "tenant-1", "org-1", List.of(), "msg-1", "analyst-1", "corr-1", "req-1", message, null);
   }
 
   @Test
   void successScenario_emitsTheRealContractsEvents_toolTraceThenChunksThenPayloadThenDone() {
-    StepVerifier.create(client.streamResponse(request("Summarize this case for me")))
+    StepVerifier.create(
+            client.streamResponse(request("Give me an overview of the active policies")))
         .assertNext(
             e -> {
               assertThat(e.getEventCase()).isEqualTo(EventCase.TOOL_CALL);
-              assertThat(e.getToolCall().getArgsJson()).contains("case-1");
+              assertThat(e.getToolCall().getName()).isEqualTo("searchPolicies");
             })
         .assertNext(
             e -> {
@@ -49,7 +40,7 @@ class MockMlAgentClientTest {
         .assertNext(
             e -> {
               assertThat(e.getEventCase()).isEqualTo(EventCase.PAYLOAD);
-              assertThat(e.getPayload().getCaseManagerAnswerPayload().getKeySignalsList())
+              assertThat(e.getPayload().getPolicyManagerAnswerPayload().getKeySignalsList())
                   .allSatisfy(signal -> assertThat(signal.getCitationsList()).isNotEmpty());
             })
         .assertNext(e -> assertThat(e.getEventCase()).isEqualTo(EventCase.DONE))
@@ -68,12 +59,47 @@ class MockMlAgentClientTest {
 
   @Test
   void successScenario_chunksCarryTheCannedAnswerText() {
-    StepVerifier.create(client.streamResponse(request("Which rules were triggered?")))
+    StepVerifier.create(client.streamResponse(request("Which rules make up the velocity policy?")))
         .expectNextCount(2) // tool_call, tool_result
-        .assertNext(e -> assertThat(e.getChunk().getDelta()).contains("Two rules were triggered"))
-        .assertNext(e -> assertThat(e.getChunk().getDelta()).contains("velocity rule"))
+        .assertNext(
+            e ->
+                assertThat(e.getChunk().getDelta())
+                    .contains("velocity policy is made of two rules"))
+        .assertNext(e -> assertThat(e.getChunk().getDelta()).contains("rolling one-hour window"))
         .thenCancel()
         .verify(Duration.ofSeconds(2));
+  }
+
+  @Test
+  void generatePolicyRequest_emitsAGeneratedPolicyEventInsteadOfAPayload_thenDone() {
+    StepVerifier.create(
+            client.streamResponse(request("Generate a policy for transfers to new beneficiaries")))
+        .assertNext(e -> assertThat(e.getEventCase()).isEqualTo(EventCase.TOOL_CALL))
+        .assertNext(e -> assertThat(e.getEventCase()).isEqualTo(EventCase.TOOL_RESULT))
+        .thenConsumeWhile(e -> e.getEventCase() == EventCase.CHUNK)
+        .assertNext(
+            e -> {
+              assertThat(e.getEventCase()).isEqualTo(EventCase.GENERATED_POLICY);
+              assertThat(e.getGeneratedPolicy().getPolicyJson())
+                  .isEqualTo(MockMlAgentClient.GENERATED_POLICY_JSON);
+            })
+        .assertNext(e -> assertThat(e.getEventCase()).isEqualTo(EventCase.DONE))
+        .verifyComplete();
+  }
+
+  @Test
+  void generatePolicyTrigger_emitsAGeneratedPolicyEvent() {
+    List<AnswerEvent> events =
+        client
+            .streamResponse(request("trigger:generate-policy"))
+            .collectList()
+            .block(Duration.ofSeconds(2));
+
+    assertThat(events).isNotNull();
+    assertThat(events)
+        .extracting(AnswerEvent::getEventCase)
+        .contains(EventCase.GENERATED_POLICY)
+        .doesNotContain(EventCase.PAYLOAD);
   }
 
   @Test

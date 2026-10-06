@@ -1,15 +1,11 @@
 syntax = "proto3";
 
-// Module-neutral types shared by every ChatAgent RPC, per Thoughtful Labs'
-// finalized 3-file contract (see ../../docs/case_manager.proto, chat_agent.proto,
-// common.proto for the originals, and ../../docs/ARCHITECTURE.md for background).
-// This file must not import a module file (case_manager.proto, ...).
+// Module-neutral types shared by every ChatAgent RPC (see ../../docs/ARCHITECTURE.md
+// for background). This file must not import a module file (policy_manager.proto, ...).
 
-// NOTE: the proto package is intentionally left as `cmbotservice.mlagent.v1`, identical to
-// CM-BotService: it is part of the wire contract (the gRPC method path is
-// /cmbotservice.mlagent.v1.ChatAgent/AskCaseManager), so renaming it would break calls
-// to the ML Agent. Only java_package (codegen-only, not on the wire) is PM-specific.
-package cmbotservice.mlagent.v1;
+// NOTE: the proto package is part of the wire contract (the gRPC method path is
+// /pmbotservice.mlagent.v1.ChatAgent/AskPolicyManager) and must match the ML Agent's.
+package pmbotservice.mlagent.v1;
 
 option java_package = "com.pmbotservice.mlagent.grpc.v1";
 option java_multiple_files = true;

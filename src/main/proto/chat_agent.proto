@@ -1,31 +1,26 @@
 syntax = "proto3";
 
-// Live contract for the ML Agent's `ChatAgent.AskCaseManager` RPC — server-to-server,
-// gRPC transport. Thoughtful Labs' own finalized 3-file contract (this file,
-// case_manager.proto, common.proto — see ../../docs for the originals as received,
-// and ../../docs/ARCHITECTURE.md §2 for background). Generated Java sources land
-// under target/generated-sources/protobuf. GrpcMlAgentClient maps this backend's
-// MlAgentRequest into AskCaseManagerRequest; AnswerEvents are not mapped at all —
+// Live contract for the ML Agent's `ChatAgent.AskPolicyManager` RPC — server-to-server,
+// gRPC transport. A 3-file contract (this file, policy_manager.proto, common.proto —
+// see ../../docs/ARCHITECTURE.md §2 for background). Generated Java sources land under
+// target/generated-sources/protobuf. GrpcMlAgentClient maps this backend's
+// MlAgentRequest into AskPolicyManagerRequest; AnswerEvents are not mapped at all —
 // they are forwarded to the frontend verbatim (see com.pmbotservice.sse.SseEvents).
 
-// NOTE: the proto package is intentionally left as `cmbotservice.mlagent.v1`, identical to
-// CM-BotService: it is part of the wire contract (the gRPC method path is
-// /cmbotservice.mlagent.v1.ChatAgent/AskCaseManager), so renaming it would break calls
-// to the ML Agent. Only java_package (codegen-only, not on the wire) is PM-specific.
-package cmbotservice.mlagent.v1;
+// NOTE: the proto package is part of the wire contract (the gRPC method path is
+// /pmbotservice.mlagent.v1.ChatAgent/AskPolicyManager) and must match the ML Agent's.
+package pmbotservice.mlagent.v1;
 
 import "common.proto";
-import "case_manager.proto";
+import "policy_manager.proto";
 
 option java_package = "com.pmbotservice.mlagent.grpc.v1";
 option java_multiple_files = true;
 
 service ChatAgent {
-  // Sends a single case manager chat request to the ML Agent and streams response events
+  // Sends a single policy manager chat request to the ML Agent and streams response events
   // back to the caller.
-  rpc AskCaseManager(AskCaseManagerRequest) returns (stream AnswerEvent);
-
-  // Later: rpc AskPolicyManager(AskPolicyManagerRequest) returns (stream AnswerEvent);
+  rpc AskPolicyManager(AskPolicyManagerRequest) returns (stream AnswerEvent);
 }
 
 // Events arrive in the order they should be rendered.
@@ -56,6 +51,9 @@ message AnswerEvent {
 
     // Keepalive from the ML Agent to the caller.
     Ping ping = 7;
+
+    // A newly generated policy (JSON), when the user asked for one. See GeneratedPolicy.
+    GeneratedPolicy generated_policy = 8;
   }
 }
 
@@ -63,7 +61,7 @@ message AnswerEvent {
 // Lives here, not in common.proto, because it must import every module file.
 message AnswerPayload {
   oneof payload {
-    // The payload for a Case Manager structured answer response needing UI component rendering.
-    CaseManagerAnswerPayload case_manager_answer_payload = 1;
+    // The payload for a Policy Manager structured answer response needing UI component rendering.
+    PolicyManagerAnswerPayload policy_manager_answer_payload = 1;
   }
 }

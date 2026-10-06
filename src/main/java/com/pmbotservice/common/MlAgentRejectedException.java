@@ -2,7 +2,7 @@ package com.pmbotservice.common;
 
 /**
  * The ML Agent explicitly rejected the request for a non-transient reason — bad/expired service
- * credential (~401), tenant not permitted (~403), case not found in that tenant (~404), or a
+ * credential (~401), tenant not permitted (~403), resource not found in that tenant (~404), or a
  * malformed request/missing required context (~422), expressed as the corresponding gRPC status
  * code on the initial {@code Chat} call, before any event is streamed. Never retryable: the agent
  * understood the request and said no, so retrying unchanged would just get the same answer again.

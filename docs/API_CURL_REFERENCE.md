@@ -36,14 +36,14 @@ continuation, single-quoted JSON). On Windows:
   alias for `Invoke-WebRequest`. Use a backtick `` ` `` for line continuation, and put the
   JSON body in a file so you don't have to fight PowerShell quoting:
   ```powershell
-  '{"caseId":"case-456","message":"Summarize this case for me"}' | Out-File -Encoding ascii body.json
+  '{"message":"Which policies are currently active?"}' | Out-File -Encoding ascii body.json
   curl.exe -N -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" `
     -H "Content-Type: application/json" -H "Accept: text/event-stream" `
     -H "X-Tenant-Id: tenant-123" -H "X-Org-Id: org-123" `
     --data-binary "@body.json"
   ```
 - **cmd.exe:** one line (or `^` continuation), and escape inner double quotes:
-  `-d "{\"caseId\":\"case-456\",\"message\":\"hi\"}"`.
+  `-d "{\"message\":\"hi\"}"`.
 
 **Useful curl flags:**
 
@@ -61,7 +61,8 @@ Streams the ML Agent's answer back as SSE, forwarded unchanged from the TF Labs
 orchestrator. The event format is in [`CHAT_API_GUIDE.md`](CHAT_API_GUIDE.md) §6.
 
 **Required headers:** `X-Tenant-Id`, `Content-Type: application/json`. (`X-Org-Id` is optional.)
-**Required body fields:** `message`. (`caseId` is optional.)
+**Required body fields:** `message`. (`history`, `requestId`, `operatorId` are optional;
+unknown fields are ignored.)
 
 ### 1.1 Security mode `NONE` (local development)
 
@@ -75,7 +76,7 @@ curl -N -i -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages
   -H "X-User-Id: <analyst-id>" \
   -H "X-Tenant-Id: <tenant>" \
   -H "X-Org-Id: <org>" \
-  -d '{"caseId":"<case-id>","message":"Summarize this case for me"}'
+  -d '{"message":"Which policies are currently active?"}'
 ```
 
 Continue the conversation: resend the transcript so far as `history`, oldest turn
@@ -89,19 +90,18 @@ curl -N -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" \
   -H "X-Tenant-Id: <tenant>" \
   -H "X-Org-Id: <org>" \
   -d '{
-        "caseId": "<case-id>",
         "history": [
-          {"role": "user", "content": "Summarize this case for me"},
+          {"role": "user", "content": "Which policies are currently active?"},
           {"role": "assistant", "content": "<the answer text you received>"}
         ],
-        "message": "Which rules were triggered?"
+        "message": "Generate a policy that flags high-value transfers to new beneficiaries"
       }'
 ```
 
 All optional body fields:
 
 ```bash
-  -d '{"caseId":"<case-id>","history":[],"requestId":"<your-request-id>","endUserId":"<end-user-id>","operatorId":"<operator-id>","message":"<prompt>"}'
+  -d '{"history":[],"requestId":"<your-request-id>","operatorId":"<operator-id>","message":"<prompt>"}'
 ```
 
 ### 1.2 Security mode `BFF_SESSION`
@@ -118,7 +118,7 @@ curl -N -i -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages
   -H "Cookie: SESSION=<session value>" \
   -H "X-Tenant-Id: <tenant>" \
   -H "X-Org-Id: <org>" \
-  -d '{"caseId":"<case-id>","message":"Summarize this case for me"}'
+  -d '{"message":"Which policies are currently active?"}'
 ```
 
 `<session value>` is only the cookie's **value**, copied from the FMC UI (DevTools →
@@ -142,13 +142,15 @@ Put a keyword anywhere in `message` to simulate each outcome:
 BASE="http://localhost:8079/back-office-ai/pm/api/v1/chat/messages"
 H=(-H "Content-Type: application/json" -H "Accept: text/event-stream" -H "X-Tenant-Id: t" -H "X-Org-Id: o")
 
-curl -N -X POST "$BASE" "${H[@]}" -d '{"caseId":"c","message":"hello"}'                 # normal answer
-curl -N -X POST "$BASE" "${H[@]}" -d '{"caseId":"c","message":"trigger:slow"}'          # slow chunks
-curl -N -X POST "$BASE" "${H[@]}" -d '{"caseId":"c","message":"trigger:empty"}'         # just `done`
-curl -N -X POST "$BASE" "${H[@]}" -d '{"caseId":"c","message":"trigger:agent-error"}'   # agent's own `error` event
-curl -N -X POST "$BASE" "${H[@]}" -d '{"caseId":"c","message":"trigger:error"}'         # retried, then `service_error` ML_AGENT_ERROR
-curl -N -X POST "$BASE" "${H[@]}" -d '{"caseId":"c","message":"trigger:rejected"}'      # `service_error` NOT_FOUND
-curl -N -X POST "$BASE" "${H[@]}" -d '{"caseId":"c","message":"trigger:timeout"}'       # ~5s, then `service_error` ML_AGENT_TIMEOUT
+curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"hello"}'                    # normal answer (payload)
+curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"trigger:generate-policy"}'  # `generated_policy` event, then `done`
+curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"Create a policy for X"}'    # same: "generate"/"create" + "policy"
+curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"trigger:slow"}'             # slow chunks
+curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"trigger:empty"}'            # just `done`
+curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"trigger:agent-error"}'      # agent's own `error` event
+curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"trigger:error"}'            # retried, then `service_error` ML_AGENT_ERROR
+curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"trigger:rejected"}'         # `service_error` NOT_FOUND
+curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"trigger:timeout"}'          # ~5s, then `service_error` ML_AGENT_TIMEOUT
 ```
 
 (The `H=(...)` array is Bash syntax. In other shells, repeat the headers on each line.)
@@ -156,15 +158,15 @@ curl -N -X POST "$BASE" "${H[@]}" -d '{"caseId":"c","message":"trigger:timeout"}
 ### 1.4 Validation errors (plain `400` JSON, no stream)
 
 ```bash
-# missing caseId -> 400 VALIDATION_ERROR "caseId: caseId must not be blank"
+# blank message -> 400 VALIDATION_ERROR "message: message must not be blank"
 curl -s -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" \
   -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" \
-  -d '{"message":"hi"}'
+  -d '{"message":""}'
 
 # missing X-Tenant-Id -> 400 VALIDATION_ERROR "X-Tenant-Id header must not be blank"
 curl -s -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" \
   -H "Content-Type: application/json" -H "X-Org-Id: o" \
-  -d '{"caseId":"c","message":"hi"}'
+  -d '{"message":"hi"}'
 ```
 
 ### Reading the output
@@ -174,15 +176,26 @@ Each SSE event prints as `id:` / `event:` / `data:` lines followed by a blank li
 ```
 id:0
 event:tool_call
-data:{"tool_call":{"tool_call_id":"t-1","name":"getCase","args_json":"{\"caseId\":\"case-456\"}"}}
+data:{"tool_call":{"tool_call_id":"t-1","name":"searchPolicies","args_json":"{\"status\":\"ACTIVE\"}"}}
 
 id:1
 event:chunk
-data:{"chunk":{"delta":"This case was created because..."}}
+data:{"chunk":{"delta":"The active policy set contains three transaction-monitoring policies."}}
+```
+
+When you ask for a new policy, the stream also carries a `generated_policy` event; its
+`policy_json` is the policy as a JSON **string** (parse it client-side). It is not
+terminal:
+
+```
+id:4
+event:generated_policy
+data:{"generated_policy":{"policy_json":"{\"name\":\"New beneficiary high-value transfer\",\"enabled\":false,...}"}}
 ```
 
 The stream ends with exactly one of `done`, `error` (from the ML Agent), or
-`service_error` (from this backend).
+`service_error` (from this backend). After an `error`, discard any `generated_policy`
+received with the rest of the turn.
 
 ---
 
@@ -245,12 +258,12 @@ HTTP_REQUEST_RECEIVED        method, path, which headers/cookie are present
 AUTH_CHECK_STARTED           (BFF_SESSION only) masked session, tenant
 REDIS_SESSION_LOOKUP_STARTED (BFF_SESSION only) masked key, Redis endpoint
 REDIS_SESSION_RECORD_FOUND / _PARSED, AUTH_SUCCEEDED
-REQUEST_CONTEXT_RESOLVED     tenant, org, case, user
+REQUEST_CONTEXT_RESOLVED     tenant, org, user
 CHAT_REQUEST_RECEIVED        messageId, message length, history size (never the text)
 GRPC_CALL_STARTED            (grpc mode) target host:port   | MOCK_ML_AGENT_CALL_STARTED (mock mode)
 ML_REQUEST_STARTED           timeouts in effect
 ML_STREAM_STARTED            first event type + latency
-ML_EVENT_TOOL_CALL / _TOOL_RESULT / _PAYLOAD / _DONE / _ERROR
+ML_EVENT_TOOL_CALL / _TOOL_RESULT / _PAYLOAD / _GENERATED_POLICY / _DONE / _ERROR
 ML_STREAM_COMPLETED          per-event-type counts (chunks and pings are counted here)
 SSE_STREAM_COMPLETED         frames sent to the client
 HTTP_REQUEST_COMPLETED       status, total duration

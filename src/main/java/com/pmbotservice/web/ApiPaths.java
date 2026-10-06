@@ -1,9 +1,9 @@
 package com.pmbotservice.web;
 
 /**
- * Shared path constants. There is a single stateless endpoint — {@code tenantId} and {@code caseId}
- * travel in the request body (see {@link com.pmbotservice.web.dto.ChatRequest}), not the URL, since
- * there is no backend-owned resource to nest a path under.
+ * Shared path constants. There is a single stateless endpoint — the conversation travels in the
+ * request body (see {@link com.pmbotservice.web.dto.ChatRequest}), not the URL, since there is no
+ * backend-owned resource to nest a path under.
  *
  * <p>These are relative to {@code chatbot.api.base-path} (see {@link
  * com.pmbotservice.config.ApiProperties}), which is prepended to every controller mapping.

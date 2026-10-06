@@ -27,7 +27,7 @@ public class HeaderBasedRequestContextResolver implements RequestContextResolver
   private static final String UNKNOWN_USER = "unknown-user";
 
   @Override
-  public RequestContext resolve(ServerWebExchange exchange, String caseId) {
+  public RequestContext resolve(ServerWebExchange exchange) {
     String tenantId = RequestContextResolver.requireHeader(exchange, RequestHeaders.TENANT_ID);
     String organization =
         RequestContextResolver.optionalHeader(exchange, RequestHeaders.ORGANIZATION_ID);
@@ -42,14 +42,12 @@ public class HeaderBasedRequestContextResolver implements RequestContextResolver
     }
     log.info(
         "REQUEST_CONTEXT_RESOLVED source=headers (security mode NONE) tenantId={}"
-            + " organization={} caseId={} userId={}",
+            + " organization={} userId={}",
         tenantId,
         organization,
-        caseId,
         StringUtils.hasText(userId) ? userId : UNKNOWN_USER);
     return new RequestContext(
         tenantId,
-        caseId,
         organization,
         StringUtils.hasText(userId) ? userId : UNKNOWN_USER,
         correlationId,

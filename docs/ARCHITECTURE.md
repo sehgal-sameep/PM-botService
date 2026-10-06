@@ -10,7 +10,7 @@ ML/AI Agent:
 Frontend → Java Chat Orchestrator → ML Agent → Java Chat Orchestrator → SSE → Frontend
 ```
 
-It validates each request, propagates tenant/case/user/correlation/trace metadata,
+It validates each request, propagates tenant/user/correlation/trace metadata,
 calls the ML Agent through a circuit breaker + bulkhead + bounded retry + declarative
 timeouts, and streams the response back. It does **not** implement a chatbot UI, an ML
 model, prompt engineering, or ML Agent internals — those are owned by other teams. It
@@ -60,12 +60,12 @@ rewrite from zero.
 Frontend (curl/Swagger)
    │  POST /api/v1/chat/messages   (Accept: text/event-stream)
    │  Headers: X-Tenant-Id (required), X-Org-Id (optional)
-   │  Body: { caseId, history?, requestId?, endUserId?, operatorId?, message }
+   │  Body: { history?, requestId?, operatorId?, message }   (unknown fields ignored)
    ▼
 ChatController
    → Bean Validation (WebExchangeBindException → 400, pre-stream — the only way a
    │   request fails before the SSE response commits at 200)
-   → resolves RequestContext (tenant/organization from headers, case/user/correlationId)
+   → resolves RequestContext (tenant/organization from headers, user/correlationId)
    │   — missing/blank X-Tenant-Id → ResponseStatusException(400)
    │   → also pre-stream, same VALIDATION_ERROR shape as a bad body field
    → returns Flux<ServerSentEvent<Object>> — Spring subscribes and writes as elements arrive
@@ -86,8 +86,8 @@ ChatOrchestrationService (fully reactive — no thread, no blocking call, anywhe
      event, not an HTTP status (the agent's own `error` event is just forwarded)
    ▼
 MockMlAgentClient / GrpcMlAgentClient (impl of MlAgentClient)
-   → streams the agent's own AnswerEvents (chunk/tool_call/tool_result/payload/done/
-   │   error/ping) as received — no identifier is ever revealed; resending `history` on
+   → streams the agent's own AnswerEvents (chunk/tool_call/tool_result/payload/
+   │   generated_policy/done/error/ping) as received — no identifier is ever revealed; resending `history` on
    │   the next request is the caller's only resumption mechanism
    → (real client) never buffers the full response — a straight Flux, gRPC → Netty
 ```
@@ -104,15 +104,19 @@ Agent's own contract, not of either transport.
 
 ### The real ML Agent request/response contract
 
-Thoughtful Labs' finalized 3-file protobuf contract (`src/main/proto/common.proto`,
-`case_manager.proto`, `chat_agent.proto` — see §6 for the live schema), carried over
-gRPC's server-streaming `ChatAgent.AskCaseManager` RPC. This superseded an earlier,
-single-file contract (`Chat`/`ChatRequest`/`ChatEvent`, originally itself a translation
-of a documented `POST /v1/chat` + SSE contract) — this section describes the current,
-finalized shape only; shown here as JSON for readability, field names map 1:1 to the
+A 3-file protobuf contract (`src/main/proto/common.proto`, `policy_manager.proto`,
+`chat_agent.proto` — see §6 for the live schema), carried over gRPC's server-streaming
+`ChatAgent.AskPolicyManager(AskPolicyManagerRequest) returns (stream AnswerEvent)` RPC.
+A Policy Manager conversation is plain question/answer, and `AnswerEvent` has a
+`generated_policy` arm for newly generated policies. The proto package is
+`pmbotservice.mlagent.v1` — it is part of the gRPC wire path
+(`/pmbotservice.mlagent.v1.ChatAgent/AskPolicyManager`), so it must match the ML
+Agent's. This contract superseded an earlier, single-file contract
+(`Chat`/`ChatRequest`/`ChatEvent`, originally itself a translation of a documented
+`POST /v1/chat` + SSE contract) — this section describes the current shape only; shown here as JSON for readability, field names map 1:1 to the
 `.proto` message fields (`camelCase` JSON ↔ `snake_case` proto).
 
-Request (`AskCaseManagerRequest`):
+Request (`AskPolicyManagerRequest` — `request_context`, `operator_id`, `prompt`, `history`):
 
 ```json
 {
@@ -123,10 +127,9 @@ Request (`AskCaseManagerRequest`):
     "requestId": "<this backend's own correlation id>"
   },
   "operatorId": "analyst-1",
-  "prompt": "Summarise this case",
-  "caseContext": { "caseId": "1234", "endUserId": null },
+  "prompt": "Which rules make up the velocity policy?",
   "history": [
-    { "user": { "prompt": "Summarise this case" } },
+    { "user": { "prompt": "Which policies are currently active?" } },
     { "agent": { "text": "..." } }
   ]
 }
@@ -151,15 +154,14 @@ otherwise interpret it. `requestContext
 the contract's own "groups related requests for tracing and metrics" — it carries no
 server-side state); `requestContext.requestId` is this backend's *own* correlation id
 (from `X-Correlation-Id`/generated), not the caller's `requestId` field, despite the
-similarly-named fields on both sides. `operatorId` and `caseContext.endUserId` come
-only from the frontend's optional `operatorId`/`endUserId` body fields and are left
-unset when not sent — neither is ever defaulted or filled from the other, and
-`RequestContext.userId()` (`X-User-Id`/session username) is used for logging only,
+similarly-named fields on both sides. `operatorId` comes only from the frontend's
+optional `operatorId` body field and is left unset when not sent — it is never
+defaulted, and `RequestContext.userId()` (`X-User-Id`/session username) is used for logging only,
 never forwarded. The product/prod-auth path
 (`context_token` on the old contract) has no equivalent field at all in this finalized
 contract — moot, not merely unwired.
 
-Seven event types (`AnswerEvent`), an unset or unrecognised `event` oneof arm MUST be
+Eight event types (`AnswerEvent`), an unset or unrecognised `event` oneof arm MUST be
 (and is) silently ignored per the contract, never treated as an error:
 
 | Event | Payload | Cardinality |
@@ -167,21 +169,31 @@ Seven event types (`AnswerEvent`), an unset or unrecognised `event` oneof arm MU
 | `chunk` | `{ delta }` | many — streaming answer text |
 | `tool_call` | `{ tool_call_id, name, args_json }` | 0..n |
 | `tool_result` | `{ tool_call_id, status, ms, row_count? }` | one per `tool_call` |
-| `payload` | structured Case Manager analysis (below), wrapped in a module-union `AnswerPayload` oneof | at most one, before `done` |
+| `payload` | structured Policy Manager analysis (below), wrapped in a module-union `AnswerPayload` oneof | at most one, before `done` |
+| `generated_policy` | `{ policy_json }` — a newly generated policy, serialized as a JSON string (below) | 0..n, when the user asked for a new policy; not terminal |
 | `done` | `{ stop_reason, latency_ms, tokens_in, tokens_out }` | one, terminal |
 | `error` | `{ code, retryable }` | terminal |
 | `ping` | (empty) | 0..n — pure transport keepalive |
 
 Every one of these is forwarded to the frontend unchanged (§5).
 
-`payload` (`CaseManagerAnswerPayload`, the Case Manager module's payload arm):
+`payload` (`PolicyManagerAnswerPayload`, the `policy_manager_answer_payload` arm —
+`AnswerPayload` field 1):
 
 ```json
 {
-  "key_signals": [{ "signal": "...", "citations": ["7ff7-..._TRX"] }],
-  "citations": [{ "id": "7ff7-..._TRX", "source": "AgenticGetCase.events[].decision", "fields": ["ri..."] }]
+  "key_signals": [{ "signal": "...", "citations": ["pol-2"] }],
+  "citations": [{ "id": "pol-2", "source": "searchPolicies", "fields": ["policies[1].rules"] }]
 }
 ```
+
+`generated_policy` (`GeneratedPolicy { string policy_json = 1; }`, `AnswerEvent` field
+8) is sent when the user asks the agent to generate a new policy. `policy_json` is the
+policy document serialized as JSON (same convention as `ToolCall.args_json`), forwarded
+untouched — the frontend `JSON.parse`s it. It is not terminal: `chunk`s may precede or
+follow it, and the stream still ends with `done` (keep it) or `error` (the client MUST
+discard it along with the rest of the turn). This backend does not inspect it beyond a
+WARN (`GRPC_GENERATED_POLICY_CONTRACT_VIOLATION`) when `policy_json` is empty.
 
 This is deliberately much smaller than the earlier contract's `payload` — no
 top-level `answer`, no `summary.narrative`/`entities`/`timeline`, no
@@ -199,7 +211,7 @@ frontend as the agent's own enum value; this backend no longer collapses it into
 boolean of its own.
 
 Errors — a 3-value `Error.Code` enum plus an explicit `retryable` boolean, used either
-as the gRPC status of the initial `AskCaseManager` call (pre-stream — mapped from the
+as the gRPC status of the initial `AskPolicyManager` call (pre-stream — mapped from the
 closest-matching `Status.Code`, since gRPC has no literal "401") or as the terminal
 `error` event's `code`/`retryable` (in-stream):
 
@@ -262,9 +274,10 @@ No repository/persistence layer anywhere in this diagram — there is none.
 ## 4. API Surface & the pre-stream/in-stream error boundary
 
 One endpoint: `POST /api/v1/chat/messages`. `tenantId`/`organization` travel as the
-`X-Tenant-Id` (required) / `X-Org-Id` (optional) request headers; `caseId`/`history`/
-`requestId`/`endUserId` travel in the request body — there is no backend-owned
-resource to nest a path segment under. `history` is optional (omit or send empty to
+`X-Tenant-Id` (required) / `X-Org-Id` (optional) request headers; `message`/`history`/
+`requestId`/`operatorId` travel in the request body — there is no backend-owned
+resource to nest a path segment under. Unknown body fields are ignored, not rejected.
+`history` is optional (omit or send empty to
 start a new conversation, resend the growing transcript to continue one); this backend
 never stores, assembles, or interprets it.
 
@@ -298,8 +311,8 @@ agent's response messages needs only a `.proto` update here, no Java mapping.
 
 | SSE field | Value |
 |---|---|
-| `event:` | the name of the `AnswerEvent` oneof field that is set — `chunk`, `tool_call`, `tool_result`, `payload`, `done`, `error`, `ping` — read from the protobuf descriptor (`findFieldByNumber(eventCase.getNumber()).getName()`), never a hand-written mapping |
-| `data:` | the whole `AnswerEvent`, rendered by `JsonFormat.printer().preservingProtoFieldNames().alwaysPrintFieldsWithNoPresence().omittingInsignificantWhitespace()`: original `.proto` field names and nesting (`{"payload":{"case_manager_answer_payload":{"key_signals":[...]}}}`), enums as proto names, default-valued fields still printed (oneof members such as `row_count` only when set). Per the proto3 JSON mapping, `int64` fields are JSON strings. Handed to Spring as a pre-rendered `String`, which its SSE writer emits without a second JSON encoding |
+| `event:` | the name of the `AnswerEvent` oneof field that is set — `chunk`, `tool_call`, `tool_result`, `payload`, `generated_policy`, `done`, `error`, `ping` — read from the protobuf descriptor (`findFieldByNumber(eventCase.getNumber()).getName()`), never a hand-written mapping |
+| `data:` | the whole `AnswerEvent`, rendered by `JsonFormat.printer().preservingProtoFieldNames().alwaysPrintFieldsWithNoPresence().omittingInsignificantWhitespace()`: original `.proto` field names and nesting (`{"payload":{"policy_manager_answer_payload":{"key_signals":[...]}}}`), enums as proto names, default-valued fields still printed (oneof members such as `row_count` only when set). Per the proto3 JSON mapping, `int64` fields are JSON strings. Handed to Spring as a pre-rendered `String`, which its SSE writer emits without a second JSON encoding |
 | `id:` | a 0-based frame counter, assigned once via `Flux#index()` — SSE transport metadata, the only thing this backend adds to an agent event |
 
 The canonical proto3 JSON mapping was chosen over a hand-rolled serializer because it
@@ -308,7 +321,9 @@ message — pinned by `SseEventsTest`) and is what any other protobuf consumer w
 produce for the same message.
 
 Forwarded: every event type, including `ping` (keeps intermediaries from idling the
-SSE connection, and resets the idle timeout, §8) and the agent's `error`. Withheld: only
+SSE connection, and resets the idle timeout, §8), `generated_policy`
+(`{"generated_policy":{"policy_json":"<policy as a JSON string>"}}` — the frontend must
+`JSON.parse` `policy_json`; not terminal) and the agent's `error`. Withheld: only
 an `AnswerEvent` with its `event` oneof unset — per the contract, clients MUST ignore it,
 and there is nothing recognisable to forward (unknown fields are not representable in
 proto3 JSON without the schema).
@@ -338,7 +353,7 @@ public interface MlAgentClient {
 
 The element type is the ML Agent's own generated `AnswerEvent` — there is no
 backend-owned response domain model (the former sealed `MlAgentStreamEvent` and
-`CaseSummaryPayload` existed only to rename/reshape it and were removed). Transport
+its payload types existed only to rename/reshape it and were removed). Transport
 failures still flow through the `Flux`'s native error channel as `MlAgentException`
 subtypes, which is what lets `.timeout()`, `.retryWhen()`, and the resilience4j
 operators compose declaratively in `ChatOrchestrationService`; the agent's model-level
@@ -346,9 +361,12 @@ operators compose declaratively in `ChatOrchestrationService`; the agent's model
 
 **`MockMlAgentClient`** — no threads, no polling loops, nothing that could leak:
 emits the real contract's messages — `Flux.concat(toolTrace, chunks.delayElements(delay),
-Mono.just(payload), Mono.just(done))` for success/slow (a `tool_call`/`tool_result`
-pair, `chunk`s, a `payload` with a citation on every key signal, then `done`), so mock
-mode puts the exact production wire format on the stream; `Flux.error(...)` for
+Mono.just(payload), Mono.just(done))` for success/slow (a `searchPolicies`
+`tool_call`/`tool_result` pair, policy-themed `chunk`s, a `payload` with a citation on
+every key signal, then `done`), so mock mode puts the exact production wire format on
+the stream; the same shape with a `generated_policy` (a sample policy JSON) in place of
+the `payload` for `trigger:generate-policy` or any message containing "generate"/"create"
+and "policy"; `Flux.error(...)` for
 `trigger:error`/`trigger:rejected` (a transport failure, as a gRPC status would be);
 a single agent `error` event for `trigger:agent-error`; `Flux.just(done)` for empty;
 `Flux.never()` for timeout — the orchestrator's own timeout operator is what ends
@@ -359,8 +377,8 @@ transport-agnostic — this class never changed across either transport swap
 echo-or-fabricate logic once the finalized contract confirmed neither exists.
 
 **`GrpcMlAgentClient`** — built from the shared `ManagedChannel`/`ChatAgentStub` (§7),
-calls the ML Agent's `AskCaseManager` server-streaming RPC
-(`src/main/proto/{common,case_manager,chat_agent}.proto`). grpc-java's generated
+calls the ML Agent's `AskPolicyManager` server-streaming RPC
+(`src/main/proto/{common,policy_manager,chat_agent}.proto`). grpc-java's generated
 async stub is callback-based (`StreamObserver`), not `Flux`-based, so
 `grpcEventFlux` bridges the two manually via `Flux.create` plus grpc-java's own manual
 flow-control API (`ClientCallStreamObserver#disableAutoRequestWithInitial(0)`/
@@ -371,7 +389,7 @@ inside `ClientResponseObserver#beforeStart(...)` — grpc-java throws
 `IllegalStateException: Not started`, because `beforeStart` runs *before* the
 underlying `ClientCall.start()`. The fix is to stash the `ClientCallStreamObserver`
 reference in `beforeStart` and only wire `sink.onRequest(...)`/`sink.onCancel(...)` to
-it *after* the `stub.askCaseManager(...)` call returns (which is exactly when
+it *after* the `stub.askPolicyManager(...)` call returns (which is exactly when
 `start()` has finished) — see `GrpcMlAgentClient#grpcEventFlux`.
 
 A second sharp edge, found in `mode: grpc` against the real agent: the convenience
@@ -389,8 +407,8 @@ Never buffers the full response (no `collectList()`/`.block()` anywhere — prov
 the in-process gRPC tests, not just claimed), and emits each `AnswerEvent` it
 receives unchanged — the tests assert deep `equals` between what the in-process server
 sent and what the client emitted. The only per-event work is a WARN on a contract
-anomaly (a `payload` violating the citation invariant, §16, or an unset-oneof event,
-which is also filtered out). Per-event INFO logging is in `ChatOrchestrationServiceImpl`,
+anomaly (a `payload` violating the citation invariant, §16, a `generated_policy` with
+an empty `policy_json`, or an unset-oneof event, which is also filtered out). Per-event INFO logging is in `ChatOrchestrationServiceImpl`,
 so the mock and real clients share it. The initial call's gRPC
 `Status.Code` is still translated into `MlAgentRejectedException`/
 `MlAgentCommunicationException`/`MlAgentUnavailableException`, since a status is not an
@@ -419,11 +437,10 @@ values come from typed, `@Validated`
 [`MlAgentProperties`](../src/main/java/com/pmbotservice/config/MlAgentProperties.java)
 — a missing/invalid mandatory value fails startup, not a request.
 
-**Build-time codegen**: `src/main/proto/{common,case_manager,chat_agent}.proto` —
-Thoughtful Labs' finalized 3-file contract, kept flat under `src/main/proto/` (no
+**Build-time codegen**: `src/main/proto/{common,policy_manager,chat_agent}.proto` —
+the Policy Manager 3-file contract, kept flat under `src/main/proto/` (no
 subdirectory) consistent with this repo's existing convention, all three sharing one
-package (`cmbotservice.mlagent.v1` — kept identical to CM-BotService's since it is part of
-the gRPC wire path — / Java `com.pmbotservice.mlagent.grpc.v1`) — is compiled
+package (`pmbotservice.mlagent.v1` — part of the gRPC wire path — / Java `com.pmbotservice.mlagent.grpc.v1`) — is compiled
 into `ChatAgentGrpc`/message classes by `protobuf-maven-plugin` (+ the `os-maven-plugin`
 build extension, which resolves the right `protoc`/`protoc-gen-grpc-java` native
 binary per OS — verified working on Windows) bound to `generate-sources`, so the
@@ -574,15 +591,14 @@ introduced carelessly.
 [`CorrelationIdFilter`](../src/main/java/com/pmbotservice/context/CorrelationIdFilter.java)
 is a `WebFilter`: accept-or-generate the correlation ID, echo it on the response
 header, and write it into the Reactor `Context` via `.contextWrite(...)` around
-`chain.filter(exchange)`. `tenantId`/`caseId` are added to the same `Context` once the
-request body is parsed, at the top of `ChatOrchestrationService.streamMessage`.
+`chain.filter(exchange)`. `tenantId` is added to the same `Context` once it has been
+resolved from the request headers, at the top of `ChatOrchestrationService.streamMessage`.
 
 Getting those `Context` values to actually show up in MDC on whatever thread happens
 to be running at log time — without an unsafe shared `ThreadLocal` — is exactly what
 Micrometer's `ContextRegistry`/`ThreadLocalAccessor` SPI exists for.
 [`MdcContext`](../src/main/java/com/pmbotservice/context/MdcContext.java) registers
-three `ThreadLocalAccessor<String>` instances at startup (`correlationId`/`tenantId`/
-`caseId`), and Reactor restores each one into MDC around every operator boundary,
+two `ThreadLocalAccessor<String>` instances at startup (`correlationId`/`tenantId`), and Reactor restores each one into MDC around every operator boundary,
 scoped correctly per-subscription — *provided* automatic context propagation is
 actually switched on.
 
@@ -590,14 +606,13 @@ actually switched on.
 original version of this section claimed Spring Boot enables
 `Hooks.enableAutomaticContextPropagation()` automatically once `context-propagation`
 is on the classpath (pulled in transitively by `micrometer-tracing-bridge-otel`).
-That turned out not to be happening: every registered key — `tenantId`, `caseId` —
-showed up blank in every log line across the entire reactive migration, and it went
+That turned out not to be happening: every registered key (e.g. `tenantId`) showed up blank in every log line across the entire reactive migration, and it went
 unnoticed because verification focused on SSE content, actuator endpoints, and
 cancellation/circuit-breaker behavior rather than scrutinizing the MDC fields in the
 log output themselves. It surfaced only once the log output was specifically checked
 end-to-end. Fixed by calling `Hooks.enableAutomaticContextPropagation()` explicitly in
 `MdcContext`'s `@PostConstruct`, right next to the accessor registration, so the two
-can't drift out of sync again — verified live afterward: `tenantId`/`caseId` (and
+can't drift out of sync again — verified live afterward: `tenantId` (and
 `correlationId`, which worked before since it's also readable directly off the
 exchange, independent of this mechanism) all populate correctly.
 
@@ -615,18 +630,18 @@ earlier iteration added one (`X-Window-Id`, a client-generated ID meant to stay 
 across a conversation reset) — it was removed as unnecessary: `correlationId` already
 identifies one request, and the finalized contract has no per-conversation identifier
 for a second token to shadow. Log/monitoring correlation for one chatbot interaction is
-fully covered by `correlationId`/`tenantId`/`caseId` alone.
+fully covered by `correlationId`/`tenantId` alone.
 
 This is also the tenant-safety story: `RequestContext` is passed as an explicit
 parameter through every service method (never ambient/thread-local), and Reactor
 `Context` is inherently per-subscription — there is no shared mutable state for one
-request's tenant/case/conversation identifiers to leak into another's, even under
+request's tenant/conversation identifiers to leak into another's, even under
 concurrency, even by accident.
 
 ## 12. Logging
 
 SLF4J + Logback, color-coded console pattern (see README). MDC keys
-`correlationId`/`tenantId`/`caseId`/`traceId`/`spanId` appear on every log line for one
+`correlationId`/`tenantId`/`traceId`/`spanId` appear on every log line for one
 chatbot interaction (§11). `RequestLoggingFilter` (ordered right after
 `CorrelationIdFilter`, inside its Reactor context) brackets each API request with
 `HTTP_REQUEST_RECEIVED`/`HTTP_REQUEST_COMPLETED`. Each component then logs its own step.
@@ -644,7 +659,8 @@ Filter by correlation ID to get one request's whole trail. Send
 `REDIS_SESSION_RECORD_FOUND`/`_PARSED`, `AUTH_SUCCEEDED` → `REQUEST_CONTEXT_RESOLVED` →
 `CHAT_REQUEST_RECEIVED` → `GRPC_CALL_STARTED` (target host:port) or
 `MOCK_ML_AGENT_CALL_STARTED` → `ML_REQUEST_STARTED` → `ML_STREAM_STARTED` →
-`ML_EVENT_TOOL_CALL`/`_TOOL_RESULT`/`_PAYLOAD`/`_DONE`/`_ERROR` → `ML_STREAM_COMPLETED`
+`ML_EVENT_TOOL_CALL`/`_TOOL_RESULT`/`_PAYLOAD`/`_GENERATED_POLICY`/`_DONE`/`_ERROR` →
+`ML_STREAM_COMPLETED`
 (per-event-type counts; `chunk`/`ping` are counted rather than logged one by one) →
 `SSE_STREAM_COMPLETED` → `HTTP_REQUEST_COMPLETED` (status, duration).
 
@@ -652,6 +668,7 @@ WARN/ERROR events: `AUTH_REJECTED`, `REDIS_SESSION_RECORD_NOT_FOUND`,
 `REDIS_SESSION_RECORD_INCOMPLETE`/`_UNPARSEABLE`, `REDIS_SESSION_LOOKUP_FAILED`
 (Redis endpoint, full cause chain, stack trace), `GRPC_CALL_FAILED` (gRPC status and
 description), `GRPC_EVENT_IGNORED`, `GRPC_PAYLOAD_CONTRACT_VIOLATION`,
+`GRPC_GENERATED_POLICY_CONTRACT_VIOLATION`,
 `ML_REQUEST_RETRY`, `ML_REQUEST_TIMEOUT`, `CIRCUIT_BREAKER_OPEN`,
 `CONCURRENCY_LIMIT_REACHED`, `ML_AGENT_REJECTED`, `ML_REQUEST_FAILED`,
 `SSE_SERVICE_ERROR_SENT`, `REQUEST_VALIDATION_FAILED`, `REQUEST_REJECTED`. At startup:
@@ -659,8 +676,8 @@ description), `GRPC_EVENT_IGNORED`, `GRPC_PAYLOAD_CONTRACT_VIOLATION`,
 `REDIS_SESSION_STORE_REACHABLE` or `REDIS_SESSION_STORE_UNREACHABLE` with the cause chain,
 and `ML_AGENT_GRPC_CHANNEL_CONFIGURED` or `ML_AGENT_MOCK_CONFIGURED`.
 
-Never logged: prompt, history, or answer text (only lengths and counts, since case text
-may contain personal data), access/refresh tokens, the Redis password, or the raw
+Never logged: prompt, history, answer text, or generated policy JSON (only lengths and
+counts, since free text may contain personal data), access/refresh tokens, the Redis password, or the raw
 session ID (only masked by `LogSanitizer.maskSecret`, e.g. `****cdef(len=29)`).
 
 ## 13. Metrics
@@ -668,7 +685,7 @@ session ID (only masked by `LogSanitizer.maskSecret`, e.g. `****cdef(len=29)`).
 [`ChatMetrics`](../src/main/java/com/pmbotservice/service/ChatMetrics.java) is the
 **only** class allowed to touch `MeterRegistry` directly — every method takes a
 fixed, low-cardinality argument, so it's structurally impossible for a future change
-to accidentally tag a metric with `caseId`/`userId` (the brief's own
+to accidentally tag a metric with `messageId`/`userId` (the brief's own
 high-cardinality warning becomes a compile-time-enforced boundary, not just a
 convention). See README for the full metric list; circuit breaker/bulkhead metrics
 come from resilience4j's own binders (§9), not from this class.
@@ -705,9 +722,9 @@ server type; pure configuration, no custom lifecycle code.
 
 ## 15. Validation, Sizing, DTO Boundaries
 
-`ChatRequest` (frontend-facing): `@NotBlank`/`@Size`/`@Pattern` on `caseId`
-(identifier charset + length hardening; `tenantId`/`organization` are validated
-separately, as required headers, by `RequestContextResolver`), `@Size(max=4000)` hard
+`ChatRequest` (frontend-facing): unknown fields are ignored, not rejected; `tenantId`/`organization` are validated separately, as headers, by
+`RequestContextResolver`; `@Size(max=200)` on the optional `operatorId`; `@NotBlank` +
+`@Size(max=4000)` hard
 ceiling on `message` plus a separately-configurable, runtime-checked
 `chat.max-message-length` ceiling (belt-and-suspenders: the annotation is the
 absolute limit this API will ever accept, the property lets ops tighten it further
@@ -726,7 +743,7 @@ in the current contract needs one.
 
 DTO boundary: the **request** side is still mapped — `ChatRequest` (frontend) →
 `MlAgentRequest` (built explicitly by `ChatOrchestrationServiceImpl`) →
-`AskCaseManagerRequest` (the proto, built by `GrpcMlAgentClient`). The **response** side
+`AskPolicyManagerRequest` (the proto, built by `GrpcMlAgentClient`). The **response** side
 deliberately is not: the agent's `AnswerEvent` goes straight to a `ServerSentEvent`,
 so the frontend consumes the ML Agent's response contract directly and its changes
 propagate to the frontend by design (§5).
@@ -734,15 +751,13 @@ propagate to the frontend by design (§5).
 ## 16. ML Agent Response Validation
 
 This backend no longer judges the content of the agent's events; it forwards them.
-An unset (or unrecognised) `event` oneof case is ignored per the contract ("clients
+An unset (or unrecognised) `event` oneof arm is ignored per the contract ("clients
 MUST ignore events whose `event` oneof is unset or unrecognised and continue reading
 the stream" — logged at WARN as `GRPC_EVENT_IGNORED`, stream continues). The contract's `payload` invariant
 (every `key_signal` carries ≥1 citation) and a `payload` with no recognised arm are
 reported as WARN logs by `GrpcMlAgentClient` but the event is still forwarded as-is —
 rejecting the whole answer would be this backend overriding the agent's response, and
-the contract already requires clients to tolerate unresolvable citation ids. (This
-used to fail the stream via `CaseSummaryPayloadValidator`, since removed.)
-`MlAgentMalformedResponseException` now covers only an event that cannot be rendered
+the contract already requires clients to tolerate unresolvable citation ids. `MlAgentMalformedResponseException` now covers only an event that cannot be rendered
 as JSON at all.
 
 ## 17. Security Hardening (code-level; no gateway/infra here)
@@ -799,9 +814,9 @@ com.pmbotservice
  │               ChatMetrics
  ├─ mlagent/    MlAgentClient, MlAgentRequest, MockMlAgentClient, MockScenario,
  │               GrpcMlAgentClient, grpc.v1/ (generated: ChatAgentGrpc,
- │               AskCaseManagerRequest, AnswerEvent, AnswerPayload,
- │               CaseManagerAnswerPayload, AgentRequestContext, ConversationTurn,
- │               Chunk, ToolCall, ToolResult, Done, Error, Ping)
+ │               AskPolicyManagerRequest, AnswerEvent, AnswerPayload,
+ │               PolicyManagerAnswerPayload, GeneratedPolicy, AgentRequestContext,
+ │               ConversationTurn, Chunk, ToolCall, ToolResult, Done, Error, Ping)
  ├─ sse/        SseEvents (AnswerEvent → SSE, verbatim), SseEventType,
  │               ServiceErrorEvent
  └─ common/     ErrorCode, MlAgentException, MlAgentTimeoutException,
@@ -975,7 +990,7 @@ server (the gRPC analog of MockWebServer), a mocked Redis template
 including a dedicated `ChatControllerAuthenticationTest` for `mode: BFF_SESSION`
 alongside the default-mode `ChatControllerTest`) green, including the ML Agent
 contract's request field mapping over gRPC (`history` translated into the `user`/
-`agent` oneof), all seven event types forwarded as the identical proto message and
+`agent` oneof), every event type forwarded as the identical proto message and
 rendered as SSE with the agent's own event names and field names (`SseEventsTest`
 round-trips every one back through `JsonFormat.parser()`), the agent's `error` event
 and a citation-less `payload` forwarded untouched, an unset-`oneof` event ignored
@@ -991,7 +1006,7 @@ stays UP throughout; mid-stream client disconnect → `SSE_CLIENT_CANCELLED` at 
 zero ERROR-level noise; `/actuator/health`, `/actuator/health/{liveness,readiness}`,
 `/actuator/prometheus`, `/actuator/circuitbreakers` all reachable and correct; a
 `grep -rn "\.block()\|Thread.sleep" src/main/java` sanity check returns zero hits in
-production code; `tenantId`/`caseId` MDC fields populating correctly end-to-end after
+production code; the `tenantId` MDC field populating correctly end-to-end after
 the `Hooks.enableAutomaticContextPropagation()` fix (§11) — re-verified with a fresh
 app start and real curl calls, not just the unit tests. App
 boot re-verified in both `ml-agent.mode: mock` (full chat flow works end-to-end) and

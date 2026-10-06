@@ -6,11 +6,11 @@ import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.server.ServerWebExchange;
 
 /**
- * Resolves "who is calling, for which tenant/organization/case" into a {@link RequestContext}.
- * {@code tenantId}/{@code organization} are read from the {@code X-Tenant-Id}/{@code X-Org-Id}
- * request headers (see {@link RequestHeaders}) by every implementation. {@code X-Tenant-Id} is
- * required — an implementation rejects the request (400, {@code ErrorCode.VALIDATION_ERROR}) if it
- * is missing or blank. {@code X-Org-Id} is optional — missing or blank resolves to a {@code null}
+ * Resolves "who is calling, for which tenant/organization" into a {@link RequestContext}. {@code
+ * tenantId}/{@code organization} are read from the {@code X-Tenant-Id}/{@code X-Org-Id} request
+ * headers (see {@link RequestHeaders}) by every implementation. {@code X-Tenant-Id} is required —
+ * an implementation rejects the request (400, {@code ErrorCode.VALIDATION_ERROR}) if it is missing
+ * or blank. {@code X-Org-Id} is optional — missing or blank resolves to a {@code null}
  * organization, which is then not forwarded to the ML Agent.
  *
  * <p>This was the single seam real authentication plugged in at: {@link
@@ -22,7 +22,7 @@ import org.springframework.web.server.ServerWebExchange;
  */
 public interface RequestContextResolver {
 
-  RequestContext resolve(ServerWebExchange exchange, String caseId);
+  RequestContext resolve(ServerWebExchange exchange);
 
   /**
    * Shared by every implementation to enforce the required-header rule documented above, so the

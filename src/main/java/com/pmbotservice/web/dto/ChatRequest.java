@@ -3,29 +3,18 @@ package com.pmbotservice.web.dto;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import java.util.List;
 
 /**
  * The single request shape for this stateless orchestrator: everything the ML Agent needs for one
- * message, self-contained. There is nothing to look up server-side — {@code caseId}/{@code history}
- * are just forwarded, not validated against any stored record. {@code tenantId}/{@code
- * organization} are <b>not</b> here — the frontend sends those as the {@code X-Tenant-Id}/{@code
- * X-Org-Id} request headers instead (see {@code RequestContextResolver}), not the body.
+ * message, self-contained. There is nothing to look up server-side — {@code history} is just
+ * forwarded, not validated against any stored record. A Policy Manager conversation is plain
+ * question/answer. {@code tenantId}/{@code organization} are <b>not</b> here — the frontend sends
+ * those as the {@code X-Tenant-Id}/{@code X-Org-Id} request headers instead (see {@code
+ * RequestContextResolver}), not the body.
  */
 public record ChatRequest(
-    @Size(max = 100, message = "caseId must be at most 100 characters")
-        @Pattern(
-            regexp = "^[A-Za-z0-9_-]+$",
-            message = "caseId may only contain letters, digits, '_' and '-'")
-        @Schema(
-            description =
-                "Optional case identifier, forwarded as-is to the ML Agent. Omit (or send blank) "
-                    + "for a message not tied to a case.",
-            example = "case-456",
-            requiredMode = Schema.RequiredMode.NOT_REQUIRED)
-        String caseId,
     @Size(max = 50, message = "history must contain at most 50 turns")
         @Schema(
             description =
@@ -45,22 +34,12 @@ public record ChatRequest(
             example = "req-a1b2c3",
             requiredMode = Schema.RequiredMode.NOT_REQUIRED)
         String requestId,
-    @Size(max = 200, message = "endUserId must be at most 200 characters")
-        @Schema(
-            description =
-                "Optional hint forwarded as-is to the ML Agent's case context (end_user_id), "
-                    + "only when sent. Exact semantics are defined by the ML Agent's contract, not "
-                    + "this backend — forwarded untouched, never interpreted, defaulted, or filled "
-                    + "from operatorId/X-User-Id here.",
-            example = "gadi5",
-            requiredMode = Schema.RequiredMode.NOT_REQUIRED)
-        String endUserId,
     @Size(max = 200, message = "operatorId must be at most 200 characters")
         @Schema(
             description =
                 "Optional identifier of the operator making the request, forwarded as-is to the "
                     + "ML Agent (operator_id), only when sent. Never defaulted, and never filled "
-                    + "from endUserId, the X-User-Id header, or the BFF session.",
+                    + "from the X-User-Id header or the BFF session.",
             example = "analyst-1",
             requiredMode = Schema.RequiredMode.NOT_REQUIRED)
         String operatorId,
@@ -68,20 +47,16 @@ public record ChatRequest(
         @Size(max = 4000, message = "message must be at most 4000 characters")
         @Schema(
             description =
-                "The analyst's message — either a predefined prompt or free text. "
-                    + "For local testing, the mock ML Agent recognizes the keywords "
-                    + "'trigger:slow', 'trigger:timeout', 'trigger:error', 'trigger:empty', and "
-                    + "'trigger:rejected' anywhere in this text to simulate that scenario.",
-            example = "Summarize this case for me")
+                "The user's message — a question about policies, or a request to generate a new "
+                    + "policy. For local testing, the mock ML Agent recognizes the keywords "
+                    + "'trigger:slow', 'trigger:timeout', 'trigger:error', 'trigger:empty', "
+                    + "'trigger:rejected' and 'trigger:generate-policy' anywhere in this text to "
+                    + "simulate that scenario.",
+            example = "Generate a policy that flags high-value transfers to new beneficiaries")
         String message) {
 
-  /**
-   * A blank {@code caseId} means "no case", and a blank {@code endUserId}/{@code operatorId} means
-   * "not sent" — all normalized to {@code null} before validation, so nothing blank is forwarded.
-   */
+  /** A blank {@code operatorId} means "not sent" — normalized to {@code null}, never forwarded. */
   public ChatRequest {
-    caseId = blankToNull(caseId);
-    endUserId = blankToNull(endUserId);
     operatorId = blankToNull(operatorId);
   }
 

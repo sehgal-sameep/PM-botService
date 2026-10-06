@@ -3,9 +3,9 @@ package com.pmbotservice.common;
 /**
  * Guardrails for values this service must never write to a log in the clear.
  *
- * <p>Analyst prompts and ML Agent responses are case-related free text and may contain personal
- * data — log their <i>length</i> or counts, never their content. Session identifiers and tokens are
- * credentials — log them only through {@link #maskSecret}.
+ * <p>User prompts and ML Agent responses are free text and may contain personal data — log their
+ * <i>length</i> or counts, never their content. Session identifiers and tokens are credentials —
+ * log them only through {@link #maskSecret}.
  */
 public final class LogSanitizer {
 

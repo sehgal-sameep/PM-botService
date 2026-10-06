@@ -26,7 +26,7 @@ public record HistoryTurn(
             description =
                 "Optional. That turn's message text, forwarded as-is. May be omitted, null, empty,"
                     + " or blank — a missing value is sent to the ML Agent as an empty string.",
-            example = "Summarize this case for me",
+            example = "List the active policies",
             requiredMode = Schema.RequiredMode.NOT_REQUIRED,
             nullable = true)
         String content) {}

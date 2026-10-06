@@ -23,7 +23,7 @@ spring:
       # is a read-only, best-effort session lookup, not a dependency whose outage
       # should flip this service's own health/readiness. Excluded rather than solved
       # via the readiness-group mechanism since it shouldn't affect the plain
-      # /actuator/health aggregate either — unlike the circuit breaker case, an
+      # /actuator/health aggregate either — unlike the circuit breaker, an
       # unreachable session-auth Redis has its own explicit handling
       # (chatbot.security.fail-open-on-redis-error / a 503 error response), so a
       # second, redundant health signal adds noise without adding safety.
@@ -44,7 +44,7 @@ spring:
       # optional plain password) matches a local Redis container; a real environment
       # sets REDIS_HOST to the Azure Cache for Redis hostname (port 6380, SSL, Entra
       # ID/managed-identity passwordless auth — no password/connection string here at
-      # all in that case).
+      # all there).
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
       password: ${REDIS_PASSWORD:}
@@ -179,7 +179,7 @@ logging:
     # It auto-detects a real terminal and no-ops (plain text, no escape codes) when output isn't a console
     # (e.g. redirected to a file or picked up by a log aggregator), so this is safe for any environment.
     # %clr(%-5level) with no color argument uses Boot's built-in per-level coloring: ERROR=red, WARN=yellow, else=green.
-    console: "%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr([%thread]){faint} %clr(%-5level) %clr([corrId=%X{correlationId:-},tenant=%X{tenantId:-},case=%X{caseId:-},trace=%X{traceId:-},span=%X{spanId:-}]){cyan} %clr(%logger{36}){blue} %clr(-){faint} %msg%n%wEx"
+    console: "%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr([%thread]){faint} %clr(%-5level) %clr([corrId=%X{correlationId:-},tenant=%X{tenantId:-},trace=%X{traceId:-},span=%X{spanId:-}]){cyan} %clr(%logger{36}){blue} %clr(-){faint} %msg%n%wEx"
   level:
     # INFO is the most detailed level this service logs at (no DEBUG/TRACE statements);
     # set WARN to see only problems.

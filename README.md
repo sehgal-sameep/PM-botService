@@ -6,14 +6,14 @@ ML/AI Agent. Production-hardened for high traffic and a large number of concurre
 long-lived SSE connections: circuit breaker, bulkhead, bounded retry, declarative
 timeouts, true reactive backpressure, structured logging, metrics, and tracing.
 
-> **Origin and ML Agent contract.** This service was replicated from `CM-BotService`
-> (the Case Manager chatbot backend) and shares its architecture, configuration, and
-> behavior. The gRPC contract in `src/main/proto` is **intentionally identical** to
-> CM-BotService's for now — including the `ChatAgent.AskCaseManager` RPC, the
-> `AskCaseManagerRequest`/`CaseManagerAnswerPayload` messages, the `caseId` request field
-> that feeds the proto's case context, and the proto package `cmbotservice.mlagent.v1`
-> (part of the gRPC wire path). A Policy Manager–specific contract will replace it in a
-> separate change; only the codegen-only `java_package` is PM-specific today.
+> **ML Agent contract.** The gRPC contract in `src/main/proto` is the Policy Manager
+> one: the `ChatAgent.AskPolicyManager(AskPolicyManagerRequest) returns (stream
+> AnswerEvent)` RPC (`common.proto`, `policy_manager.proto`, `chat_agent.proto`). A
+> Policy Manager conversation is plain question/answer, and the stream includes a
+> `generated_policy` event when the user asks for a new policy (see the SSE event
+> contract below). The proto package is `pmbotservice.mlagent.v1`; it is part of the
+> gRPC wire path (`/pmbotservice.mlagent.v1.ChatAgent/AskPolicyManager`), so it must
+> match the ML Agent's.
 
 ```text
 The Java backend does not own conversation memory.
@@ -28,7 +28,7 @@ This service **does not** implement any ML/LLM logic — see
 [`GrpcMlAgentClient`](src/main/java/com/pmbotservice/mlagent/GrpcMlAgentClient.java)
 (real gRPC-based implementation, selected via config) for the abstraction the real ML
 team's API plugs into. Service-to-service communication with the ML Agent is gRPC
-(see `src/main/proto/{common,case_manager,chat_agent}.proto`) — the frontend-facing
+(see `src/main/proto/{common,policy_manager,chat_agent}.proto`) — the frontend-facing
 contract above it stays plain HTTP + SSE either way, since the two are entirely
 decoupled by this interface.
 
@@ -107,9 +107,10 @@ All controller endpoints are served under a common base path, `chatbot.api.base-
 
 `POST /back-office-ai/pm/api/v1/chat/messages` — send a message (predefined prompt or free text),
 stream the ML Agent's response back as SSE. `tenantId`/`organization` travel as the
-`X-Tenant-Id` (required) / `X-Org-Id` (optional) request headers (not the body); `caseId`/
-`history` travel in the JSON body, not the URL — there's no backend-owned resource to
-nest a path under.
+`X-Tenant-Id` (required) / `X-Org-Id` (optional) request headers (not the body);
+`message`/`history`/`requestId`/`operatorId` travel in the JSON body, not the URL —
+there's no backend-owned resource to nest a path under. Unknown body fields are
+ignored, not rejected.
 
 The real ML Agent's contract has **no conversation/continuation token at all** —
 resending the full `history` transcript (oldest turn first) on every message is the
@@ -119,19 +120,16 @@ ML Agent (translated into its own `user`/`agent` turn shape — see
 `GrpcMlAgentClient#toConversationTurn`). **This backend never stores, assembles, or
 interprets the transcript** — the caller is responsible for remembering and resending
 it. `requestId` is an optional caller-generated id forwarded for tracing/correlation
-only. `endUserId` is an optional pass-through hint forwarded to the ML Agent's case
-context — this backend does not interpret it. `operatorId` is likewise optional and
-forwarded to the ML Agent's `operatorId` as-is. Both are forwarded **only if the
-frontend sends them** (blank counts as not sent), are never defaulted, and are never
-filled from each other or from `X-User-Id`/the BFF session.
+only. `operatorId` is likewise optional and forwarded to the ML Agent's `operatorId`
+as-is — **only if the frontend sends it** (blank counts as not sent); it is never
+defaulted, and never filled from `X-User-Id`/the BFF session.
 
 `X-Tenant-Id` is a **required** header — missing or blank rejects the request with
 `400 VALIDATION_ERROR` before it ever reaches the ML Agent. `X-Org-Id`, `X-User-Id` and
 `X-Correlation-Id` are optional (see architecture doc §11); `X-Org-Id` is forwarded to
 the ML Agent only when sent (blank counts as not sent).
 Log/monitoring correlation for one chatbot interaction is handled entirely through
-`correlationId`, `tenantId`, and `caseId` — no separate client-owned tracing header is
-needed.
+`correlationId` and `tenantId` — no separate client-owned tracing header is needed.
 
 ### 1. Start a new conversation
 
@@ -142,12 +140,15 @@ curl -N -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" \
   -H "X-User-Id: analyst-1" \
   -H "X-Tenant-Id: tenant-42" \
   -H "X-Org-Id: org-7" \
-  -d '{"caseId":"case-1001","message":"Summarize this case for me"}'
+  -d '{"message":"Which policies are currently active?"}'
 ```
 
 The response is the ML Agent's own event stream, untranslated — see the SSE event
 contract below. `done` carries no identifier to capture; its `stop_reason` tells you
-whether the agent cut generation short (`STOP_REASON_TRUNCATED`).
+whether the agent cut generation short (`STOP_REASON_TRUNCATED`). Asking the agent to
+generate a new policy (e.g. `"Generate a policy that flags high-value transfers to new
+beneficiaries"`) additionally yields a `generated_policy` event carrying the policy
+JSON.
 
 ### 2. Continue the conversation
 
@@ -158,32 +159,33 @@ curl -N -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" \
   -H "Content-Type: application/json" \
   -H "X-Tenant-Id: tenant-42" \
   -H "X-Org-Id: org-7" \
-  -d '{"caseId":"case-1001","history":[{"role":"user","content":"Summarize this case for me"},{"role":"assistant","content":"..."}],"message":"Which rules were triggered?"}'
+  -d '{"history":[{"role":"user","content":"Which policies are currently active?"},{"role":"assistant","content":"..."}],"message":"Which rules make up the velocity policy?"}'
 ```
 
-Free text works the same way, e.g. `"Why was this transaction considered suspicious?"`,
-`"What should I investigate next?"`.
+Free text works the same way, e.g. `"Which policy covers geolocation mismatches?"`,
+`"Create a policy for repeated failed logins"`.
 
 ### 3. Exercise the mock ML Agent's failure modes
 
 The mock recognizes these keywords anywhere in `message`:
 
 ```bash
-curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"caseId":"c","message":"trigger:slow"}'
-curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"caseId":"c","message":"trigger:timeout"}'   # first-response timeout, then a `service_error` event
-curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"caseId":"c","message":"trigger:error"}'     # transport failure: retried, then `service_error` ML_AGENT_ERROR
-curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"caseId":"c","message":"trigger:agent-error"}' # the ML Agent's own `error` event, forwarded as-is
-curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"caseId":"c","message":"trigger:empty"}'
-curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"caseId":"c","message":"trigger:rejected"}'               # -> `service_error` errorCode NOT_FOUND, not retried
+curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"message":"trigger:generate-policy"}'      # `generated_policy` event (also: any "generate"/"create" + "policy" message)
+curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"message":"trigger:slow"}'
+curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"message":"trigger:timeout"}'   # first-response timeout, then a `service_error` event
+curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"message":"trigger:error"}'     # transport failure: retried, then `service_error` ML_AGENT_ERROR
+curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"message":"trigger:agent-error"}' # the ML Agent's own `error` event, forwarded as-is
+curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"message":"trigger:empty"}'
+curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"message":"trigger:rejected"}'               # -> `service_error` errorCode NOT_FOUND, not retried
 ```
 
 ### 4. Request validation
 
 ```bash
-curl -s -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"caseId":"bad id!","message":"hi"}'
-# -> 400 VALIDATION_ERROR: "caseId: caseId may only contain letters, digits, '_' and '-'" (caseId itself is optional)
+curl -s -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"message":""}'
+# -> 400 VALIDATION_ERROR: "message: message must not be blank"
 
-curl -s -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" -H "Content-Type: application/json" -H "X-Org-Id: o" -d '{"caseId":"c","message":"hi"}'
+curl -s -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" -H "Content-Type: application/json" -H "X-Org-Id: o" -d '{"message":"hi"}'
 # -> 400 VALIDATION_ERROR: "X-Tenant-Id header must not be blank" (missing entirely, same result)
 ```
 
@@ -194,9 +196,9 @@ couple of `trigger:error` calls will open it. Each call makes up to 4 attempts (
 retries, since nothing has streamed yet), and every attempt counts toward the breaker:
 
 ```bash
-for i in 1 2 3 4 5; do curl -s -o /dev/null -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"caseId":"c","message":"trigger:error"}'; done
+for i in 1 2 3 4 5; do curl -s -o /dev/null -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"message":"trigger:error"}'; done
 curl -s http://localhost:8079/actuator/circuitbreakers   # state: OPEN
-curl -N -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"caseId":"c","message":"hello"}'
+curl -N -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"message":"hello"}'
 # -> immediate `service_error` event, errorCode: CONCURRENCY_LIMIT_REACHED — the mock is never called
 curl -s http://localhost:8079/actuator/health/readiness  # -> still UP
 ```
@@ -231,7 +233,7 @@ a k8s liveness/readiness prober has no BFF session cookie to send.
 
 ```bash
 # mode: NONE (default) — works with no cookie at all
-curl -N -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"caseId":"c","message":"hello"}'
+curl -N -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"message":"hello"}'
 
 # mode: BFF_SESSION — needs only a session record to exist in Redis for this cookie+tenant
 curl -N -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" \
@@ -239,14 +241,14 @@ curl -N -X POST "http://localhost:8079/back-office-ai/pm/api/v1/chat/messages" \
   -H "Cookie: SESSION=<value>" \
   -H "X-Tenant-Id: t" \
   -H "X-Org-Id: o" \
-  -d '{"caseId":"c","message":"hello"}'
+  -d '{"message":"hello"}'
 ```
 
 | Property | Purpose |
 |---|---|
 | `chatbot.security.mode` | `NONE` (default) or `BFF_SESSION` — the master toggle |
 | `chatbot.security.session.cookie-name` | The BFF session cookie's name (default `SESSION`) |
-| `chatbot.security.session.tenant-header-name` | Header carrying the tenant for the Redis lookup (default `X-Tenant-Id`, reusing the same always-required header — kept as its own property in case of future divergence) |
+| `chatbot.security.session.tenant-header-name` | Header carrying the tenant for the Redis lookup (default `X-Tenant-Id`, reusing the same always-required header — kept as its own property to allow future divergence) |
 | `chatbot.security.redis.namespace` / `.strategy` / `.field-names.*` | Key prefix (default `session`, giving `session:<sessionId>:<tenant>`), the `SessionStore` bean to select, and the session envelope's field names (`context-json`/`access-token`/`refresh-token`/`fingerprint`, default `context_json`/`access_token`/`refresh_token`/`fp`) |
 | `spring.data.redis.host` / `.port` / `.ssl.enabled` / `.password` | The shared Redis connection itself (Boot-managed, not `chatbot.security.*`) — local default `localhost:6379`, no TLS |
 | `spring.data.redis.azure.passwordless-enabled` | `true` in a shared/prod environment: authenticates to Azure Cache for Redis via Entra ID/managed identity instead of a password (`spring-cloud-azure-starter-data-redis-lettuce`) |
@@ -290,7 +292,7 @@ rename events or fields, reshape payloads, or add a wrapper. Each Thoughtful Lab
 `AnswerEvent` (`src/main/proto/chat_agent.proto`) becomes one SSE event:
 
 - `event:` is the name of the `AnswerEvent` oneof field that is set: `chunk`,
-  `tool_call`, `tool_result`, `payload`, `done`, `error`, `ping`. It's read from the
+  `tool_call`, `tool_result`, `payload`, `generated_policy`, `done`, `error`, `ping`. It's read from the
   protobuf descriptor, not hard-coded, so a new arm added to the contract flows
   through under its own name.
 - `data:` is the whole `AnswerEvent` in the canonical proto3 JSON mapping
@@ -301,16 +303,16 @@ rename events or fields, reshape payloads, or add a wrapper. Each Thoughtful Lab
 
 ```
 event:tool_call
-data:{"tool_call":{"tool_call_id":"t-1","name":"getCase","args_json":"{\"caseId\":\"case-1001\"}"}}
+data:{"tool_call":{"tool_call_id":"t-1","name":"searchPolicies","args_json":"{\"status\":\"ACTIVE\"}"}}
 
 event:tool_result
-data:{"tool_result":{"tool_call_id":"t-1","status":"STATUS_OK","ms":"42","row_count":"7"}}
+data:{"tool_result":{"tool_call_id":"t-1","status":"STATUS_OK","ms":"42","row_count":"3"}}
 
 event:chunk
-data:{"chunk":{"delta":"This case was..."}}
+data:{"chunk":{"delta":"The active policy set contains..."}}
 
 event:payload
-data:{"payload":{"case_manager_answer_payload":{"key_signals":[{"signal":"...","citations":["evt-123"]}],"citations":[{"id":"evt-123","source":"getCase","fields":["risk_score"]}]}}}
+data:{"payload":{"policy_manager_answer_payload":{"key_signals":[{"signal":"...","citations":["pol-2"]}],"citations":[{"id":"pol-2","source":"searchPolicies","fields":["policies[1].rules"]}]}}}
 
 event:done
 data:{"done":{"stop_reason":"STOP_REASON_COMPLETED","latency_ms":"1800","tokens_in":"12","tokens_out":"140"}}
@@ -322,9 +324,22 @@ which is never converted into a backend error. The only agent event not forwarde
 one with its `event` oneof unset: the contract says to ignore it, and it carries
 nothing recognisable.
 
+`generated_policy` (`AnswerEvent` field 8, `GeneratedPolicy { string policy_json = 1; }`)
+is sent when the user asks the agent to generate a new policy:
+
+```
+event:generated_policy
+data:{"generated_policy":{"policy_json":"{\"name\":\"New beneficiary high-value transfer\",\"enabled\":false,...}"}}
+```
+
+`policy_json` is the policy as a JSON **string**, forwarded untouched — the frontend must
+`JSON.parse` it. It is not terminal: chunks may come before and/or after it, and the
+stream still ends with `done` (keep the policy) or `error` (discard it with the rest of
+the turn).
+
 | Event | Source | Payload |
 |---|---|---|
-| `chunk`, `tool_call`, `tool_result`, `payload`, `done`, `error`, `ping` | ML Agent, verbatim | the `AnswerEvent` as proto3 JSON (see above) |
+| `chunk`, `tool_call`, `tool_result`, `payload`, `generated_policy`, `done`, `error`, `ping` | ML Agent, verbatim | the `AnswerEvent` as proto3 JSON (see above) |
 | `service_error` | this backend | `{ messageId, errorCode, errorMessage, timestamp }`, terminal. Only for failures that produced no agent event: unreachable/timed-out/gRPC-rejected agent, circuit breaker, bulkhead, message-length check |
 
 Every stream ends with exactly one of `done`, `error`, or `service_error`. The full
@@ -373,7 +388,7 @@ Console output is color-coded (via Spring Boot's built-in Logback `%clr` convert
 extra dependency) so a developer can scan logs quickly:
 
 - **Level**: `ERROR` red, `WARN` yellow, `INFO` green
-- Trace context `[corrId=...,tenant=...,case=...,trace=...,span=...]`: cyan —
+- Trace context `[corrId=...,tenant=...,trace=...,span=...]`: cyan —
   lets you follow one chatbot interaction across lines at a glance, including its
   OpenTelemetry trace/span IDs
 - Logger name: blue; timestamp/thread/separators: faint (de-emphasized)
@@ -405,7 +420,8 @@ Filter by correlation ID to get one request's whole trail. Send
 `REDIS_SESSION_RECORD_FOUND`/`_PARSED`, `AUTH_SUCCEEDED` → `REQUEST_CONTEXT_RESOLVED` →
 `CHAT_REQUEST_RECEIVED` → `GRPC_CALL_STARTED` (target host:port) or
 `MOCK_ML_AGENT_CALL_STARTED` → `ML_REQUEST_STARTED` → `ML_STREAM_STARTED` →
-`ML_EVENT_TOOL_CALL`/`_TOOL_RESULT`/`_PAYLOAD`/`_DONE`/`_ERROR` → `ML_STREAM_COMPLETED`
+`ML_EVENT_TOOL_CALL`/`_TOOL_RESULT`/`_PAYLOAD`/`_GENERATED_POLICY`/`_DONE`/`_ERROR` →
+`ML_STREAM_COMPLETED`
 (per-event-type counts; `chunk`/`ping` are counted rather than logged one by one) →
 `SSE_STREAM_COMPLETED` → `HTTP_REQUEST_COMPLETED` (status, duration).
 
@@ -413,6 +429,7 @@ WARN/ERROR events: `AUTH_REJECTED`, `REDIS_SESSION_RECORD_NOT_FOUND`,
 `REDIS_SESSION_RECORD_INCOMPLETE`/`_UNPARSEABLE`, `REDIS_SESSION_LOOKUP_FAILED`
 (Redis endpoint, full cause chain, stack trace), `GRPC_CALL_FAILED` (gRPC status and
 description), `GRPC_EVENT_IGNORED`, `GRPC_PAYLOAD_CONTRACT_VIOLATION`,
+`GRPC_GENERATED_POLICY_CONTRACT_VIOLATION` (empty `policy_json`, still forwarded),
 `ML_REQUEST_RETRY`, `ML_REQUEST_TIMEOUT`, `CIRCUIT_BREAKER_OPEN`,
 `CONCURRENCY_LIMIT_REACHED`, `ML_AGENT_REJECTED`, `ML_REQUEST_FAILED`,
 `SSE_SERVICE_ERROR_SENT`, `REQUEST_VALIDATION_FAILED`, `REQUEST_REJECTED`. At startup:
@@ -420,13 +437,13 @@ description), `GRPC_EVENT_IGNORED`, `GRPC_PAYLOAD_CONTRACT_VIOLATION`,
 `REDIS_SESSION_STORE_REACHABLE` or `REDIS_SESSION_STORE_UNREACHABLE` with the cause chain,
 and `ML_AGENT_GRPC_CHANNEL_CONFIGURED` or `ML_AGENT_MOCK_CONFIGURED`.
 
-Never logged: prompt, history, or answer text (only lengths and counts, since case text
-may contain personal data), access/refresh tokens, the Redis password, or the raw
+Never logged: prompt, history, answer text, or generated policy JSON (only lengths and
+counts, since free text may contain personal data), access/refresh tokens, the Redis password, or the raw
 session ID (only masked by `LogSanitizer.maskSecret`, e.g. `****cdef(len=29)`).
 
 ## Metrics and tracing
 
-`/actuator/prometheus` exposes (all low-cardinality — no `caseId`/`userId` tags, ever,
+`/actuator/prometheus` exposes (all low-cardinality — no `messageId`/`userId` tags, ever,
 by construction — see `ChatMetrics`):
 
 ```text
@@ -475,7 +492,9 @@ fails startup, not a request. See `src/main/resources/application.yml`:
 - `MockMlAgentClientTest` — reactive scenario behavior via `StepVerifier` (incl.
   `withVirtualTime` for delay-shaped scenarios — no `Thread.sleep`): the success path
   emits the real contract's `AnswerEvent`s (`tool_call`/`tool_result` trace, `chunk`s,
-  `payload`, `done`), `trigger:agent-error` emits the agent's own `error` event, and
+  `payload`, `done`), `trigger:generate-policy` (or a "generate/create … policy"
+  message) emits `generated_policy` instead of `payload`, `trigger:agent-error` emits
+  the agent's own `error` event, and
   `trigger:error`/`trigger:rejected` fail the `Flux` like a gRPC status would.
 - `ChatOrchestrationServiceTest` — every agent event forwarded in order with identical
   name/data and nothing added or removed; the agent's `error` event forwarded as-is, not
@@ -540,11 +559,10 @@ Set `ml-agent.mode: grpc` and provide the real `ml-agent.grpc-host`/`grpc-port` 
 (`@ConditionalOnProperty` on both). No controller or `ChatOrchestrationService` change
 required — this is the payoff of `MlAgentClient` being a real seam: the transport
 underneath it (HTTP+SSE, then gRPC) has changed twice now, and the gRPC contract
-itself has already changed once (`Chat`/`ChatRequest`/`ChatEvent` → `AskCaseManager`/
-`AskCaseManagerRequest`/`AnswerEvent`), without either `ChatOrchestrationService` or
-`ChatController` noticing. `GrpcMlAgentClient` speaks the ML Agent's `ChatAgent.
-AskCaseManager` RPC (`src/main/proto/{common,case_manager,chat_agent}.proto`, Thoughtful
-Labs' own finalized 3-file contract) — see the SSE event contract above and
+itself has changed too (`Chat`/`ChatRequest`/`ChatEvent` → `AskPolicyManager`/
+`AskPolicyManagerRequest`/`AnswerEvent`). `GrpcMlAgentClient` speaks the ML Agent's
+`ChatAgent.AskPolicyManager` RPC (`src/main/proto/{common,policy_manager,chat_agent}.proto`)
+— see the SSE event contract above and
 `docs/ARCHITECTURE.md §2` for the full request/response shape. Because the response is
 forwarded verbatim, a change to the ML Agent's response messages reaches the frontend
 automatically once the `.proto` files here are updated, with no Java mapping to change.
@@ -597,7 +615,7 @@ layer.
   `micrometer-tracing-bridge-otel` being on the classpath and `http.server.requests`
   metrics confirming request observations *are* being created — so a span exists, but
   its trace/span IDs aren't reaching MDC. This is a different, still-open issue from
-  the one fixed above (which was about our own `tenantId`/`caseId` keys, via our own
+  the one fixed above (which was about our own `tenantId` key, via our own
   registered accessors) — Micrometer Tracing's own MDC bridging isn't working yet and
   hasn't been root-caused.
 - No exporter is configured for tracing (infrastructure, deliberately out of scope) —

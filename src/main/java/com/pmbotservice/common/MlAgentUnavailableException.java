@@ -3,7 +3,7 @@ package com.pmbotservice.common;
 /**
  * The ML Agent could not be reached at all — connection refused/reset, DNS failure, or an
  * equivalent connection-establishment failure. Retryable: this is precisely the "connection
- * establishment fails" / "connection reset before response begins" case the retry policy exists
+ * establishment fails" / "connection reset before response begins" failure the retry policy exists
  * for.
  */
 public class MlAgentUnavailableException extends MlAgentException {

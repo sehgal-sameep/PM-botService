@@ -12,14 +12,15 @@ import com.pmbotservice.common.MlAgentUnavailableException;
 import com.pmbotservice.context.RequestContext;
 import com.pmbotservice.mlagent.grpc.v1.AnswerEvent;
 import com.pmbotservice.mlagent.grpc.v1.AnswerPayload;
-import com.pmbotservice.mlagent.grpc.v1.AskCaseManagerRequest;
-import com.pmbotservice.mlagent.grpc.v1.CaseManagerAnswerPayload;
+import com.pmbotservice.mlagent.grpc.v1.AskPolicyManagerRequest;
 import com.pmbotservice.mlagent.grpc.v1.ChatAgentGrpc;
 import com.pmbotservice.mlagent.grpc.v1.Chunk;
 import com.pmbotservice.mlagent.grpc.v1.ConversationTurn;
 import com.pmbotservice.mlagent.grpc.v1.Done;
 import com.pmbotservice.mlagent.grpc.v1.Error;
+import com.pmbotservice.mlagent.grpc.v1.GeneratedPolicy;
 import com.pmbotservice.mlagent.grpc.v1.Ping;
+import com.pmbotservice.mlagent.grpc.v1.PolicyManagerAnswerPayload;
 import com.pmbotservice.mlagent.grpc.v1.ToolCall;
 import com.pmbotservice.mlagent.grpc.v1.ToolResult;
 import com.pmbotservice.security.SessionContext;
@@ -59,7 +60,7 @@ class GrpcMlAgentClientTest {
 
   private Server server;
   private ManagedChannel channel;
-  private final AtomicReference<AskCaseManagerRequest> capturedRequest = new AtomicReference<>();
+  private final AtomicReference<AskPolicyManagerRequest> capturedRequest = new AtomicReference<>();
   private final AtomicReference<Metadata> capturedHeaders = new AtomicReference<>();
 
   /** Records the metadata of every incoming call, the way a real auth interceptor would see it. */
@@ -79,8 +80,8 @@ class GrpcMlAgentClientTest {
     ChatAgentGrpc.ChatAgentImplBase service =
         new ChatAgentGrpc.ChatAgentImplBase() {
           @Override
-          public void askCaseManager(
-              AskCaseManagerRequest request, StreamObserver<AnswerEvent> responseObserver) {
+          public void askPolicyManager(
+              AskPolicyManagerRequest request, StreamObserver<AnswerEvent> responseObserver) {
             capturedRequest.set(request);
             script.accept(responseObserver);
           }
@@ -113,28 +114,26 @@ class GrpcMlAgentClientTest {
     return new MlAgentRequest(
         "tenant-1",
         "org-1",
-        "case-1",
         List.of(
             new MlAgentRequest.HistoryTurn("user", "hi"),
             new MlAgentRequest.HistoryTurn("assistant", "hello")),
         "msg-1",
         "analyst-1",
-        "gadi5",
         "corr-1",
         "req-1",
         "hello",
         accessToken);
   }
 
-  private static final CaseManagerAnswerPayload VALID_PAYLOAD =
-      CaseManagerAnswerPayload.newBuilder()
+  private static final PolicyManagerAnswerPayload VALID_PAYLOAD =
+      PolicyManagerAnswerPayload.newBuilder()
           .addKeySignals(
-              CaseManagerAnswerPayload.KeySignal.newBuilder()
+              PolicyManagerAnswerPayload.KeySignal.newBuilder()
                   .setSignal("s")
                   .addCitations("c1")
                   .build())
           .addCitations(
-              CaseManagerAnswerPayload.Citation.newBuilder()
+              PolicyManagerAnswerPayload.Citation.newBuilder()
                   .setId("c1")
                   .setSource("APP_EVENT_LOG")
                   .addFields("risk_score")
@@ -142,7 +141,7 @@ class GrpcMlAgentClientTest {
           .build();
 
   @Test
-  void everyEventType_isForwardedAsTheIdenticalProtoMessage_inOrder_includingPing()
+  void everyEventType_isForwardedAsTheIdenticalProtoMessage_inOrder_includingPingAndPolicy()
       throws IOException {
     List<AnswerEvent> sent =
         List.of(
@@ -152,7 +151,7 @@ class GrpcMlAgentClientTest {
                     ToolCall.newBuilder()
                         .setToolCallId("t1")
                         .setName("lookup")
-                        .setArgsJson("{\"caseId\":\"case-1\"}"))
+                        .setArgsJson("{\"status\":\"ACTIVE\"}"))
                 .build(),
             AnswerEvent.newBuilder()
                 .setToolResult(
@@ -165,7 +164,11 @@ class GrpcMlAgentClientTest {
             AnswerEvent.newBuilder().setPing(Ping.newBuilder()).build(),
             AnswerEvent.newBuilder().setChunk(Chunk.newBuilder().setDelta(" world")).build(),
             AnswerEvent.newBuilder()
-                .setPayload(AnswerPayload.newBuilder().setCaseManagerAnswerPayload(VALID_PAYLOAD))
+                .setPayload(AnswerPayload.newBuilder().setPolicyManagerAnswerPayload(VALID_PAYLOAD))
+                .build(),
+            AnswerEvent.newBuilder()
+                .setGeneratedPolicy(
+                    GeneratedPolicy.newBuilder().setPolicyJson("{\"name\":\"p1\",\"rules\":[]}"))
                 .build(),
             AnswerEvent.newBuilder()
                 .setDone(
@@ -274,7 +277,7 @@ class GrpcMlAgentClientTest {
 
     client.streamResponse(request()).blockLast(Duration.ofSeconds(5));
 
-    AskCaseManagerRequest sent = capturedRequest.get();
+    AskPolicyManagerRequest sent = capturedRequest.get();
     assertThat(sent).isNotNull();
     assertThat(sent.getPrompt()).isEqualTo("hello");
     assertThat(sent.getOperatorId()).isEqualTo("analyst-1");
@@ -282,8 +285,6 @@ class GrpcMlAgentClientTest {
     assertThat(sent.getRequestContext().getOrganization()).isEqualTo("org-1");
     assertThat(sent.getRequestContext().getRequestId()).isEqualTo("corr-1");
     assertThat(sent.getRequestContext().getAgentSessionId()).isEqualTo("req-1");
-    assertThat(sent.getCaseContext().getCaseId()).isEqualTo("case-1");
-    assertThat(sent.getCaseContext().getEndUserId()).isEqualTo("gadi5");
     assertThat(sent.getHistoryList()).hasSize(2);
     assertThat(sent.getHistory(0).getUser().getPrompt()).isEqualTo("hi");
     assertThat(sent.getHistory(1).getAgent().getText()).isEqualTo("hello");
@@ -295,10 +296,10 @@ class GrpcMlAgentClientTest {
         AnswerEvent.newBuilder()
             .setPayload(
                 AnswerPayload.newBuilder()
-                    .setCaseManagerAnswerPayload(
-                        CaseManagerAnswerPayload.newBuilder()
+                    .setPolicyManagerAnswerPayload(
+                        PolicyManagerAnswerPayload.newBuilder()
                             .addKeySignals(
-                                CaseManagerAnswerPayload.KeySignal.newBuilder().setSignal("s"))))
+                                PolicyManagerAnswerPayload.KeySignal.newBuilder().setSignal("s"))))
             .build();
     GrpcMlAgentClient client =
         startClientWith(
@@ -316,7 +317,7 @@ class GrpcMlAgentClientTest {
     GrpcMlAgentClient client =
         startClientWith(
             observer -> {
-              observer.onNext(AnswerEvent.newBuilder().build()); // no oneof case set
+              observer.onNext(AnswerEvent.newBuilder().build()); // no oneof arm set
               observer.onNext(done);
               observer.onCompleted();
             });
@@ -409,20 +410,10 @@ class GrpcMlAgentClientTest {
   }
 
   @Test
-  void absentOrganizationOperatorIdAndEndUserId_areNotSetOnTheProtoRequest() throws IOException {
+  void absentOrganizationAndOperatorId_areNotSetOnTheProtoRequest() throws IOException {
     MlAgentRequest withoutIds =
         new MlAgentRequest(
-            "tenant-1",
-            null,
-            "case-1",
-            List.of(),
-            "msg-1",
-            null,
-            null,
-            "corr-1",
-            "req-1",
-            "hi",
-            null);
+            "tenant-1", null, List.of(), "msg-1", null, "corr-1", "req-1", "hi", null);
     GrpcMlAgentClient client =
         startClientWith(
             observer -> {
@@ -432,10 +423,9 @@ class GrpcMlAgentClientTest {
 
     client.streamResponse(withoutIds).blockLast(Duration.ofSeconds(5));
 
-    AskCaseManagerRequest sent = capturedRequest.get();
+    AskPolicyManagerRequest sent = capturedRequest.get();
     assertThat(sent.getRequestContext().getOrganization()).isEmpty();
     assertThat(sent.getOperatorId()).isEmpty();
-    assertThat(sent.getCaseContext().getEndUserId()).isEmpty();
   }
 
   @Test
@@ -444,11 +434,9 @@ class GrpcMlAgentClientTest {
         new MlAgentRequest(
             "tenant-1",
             "org-1",
-            "case-1",
             List.of(new MlAgentRequest.HistoryTurn("assistant", "hello there")),
             "msg-1",
             "analyst-1",
-            null,
             "corr-1",
             "req-1",
             "hi",
@@ -517,9 +505,9 @@ class GrpcMlAgentClientTest {
     GrpcMlAgentClient client = startStreamingClient();
 
     client.streamResponse(request(null)).blockLast(Duration.ofSeconds(5));
-    AskCaseManagerRequest withoutToken = capturedRequest.get();
+    AskPolicyManagerRequest withoutToken = capturedRequest.get();
     client.streamResponse(request(TOKEN)).blockLast(Duration.ofSeconds(5));
-    AskCaseManagerRequest withToken = capturedRequest.get();
+    AskPolicyManagerRequest withToken = capturedRequest.get();
 
     assertThat(withToken).isEqualTo(withoutToken);
     assertThat(withToken.toString()).doesNotContain(TOKEN);
@@ -574,8 +562,7 @@ class GrpcMlAgentClientTest {
   void toString_ofEveryTokenCarrier_redactsTheToken() {
     assertThat(request(TOKEN).toString()).doesNotContain(TOKEN).contains("accessTokenPresent=true");
     assertThat(new BearerTokenCallCredentials(TOKEN).toString()).doesNotContain(TOKEN);
-    assertThat(
-            new RequestContext("tenant-1", "case-1", "org-1", "alice", "corr-1", TOKEN).toString())
+    assertThat(new RequestContext("tenant-1", "org-1", "alice", "corr-1", TOKEN).toString())
         .doesNotContain(TOKEN)
         .contains("accessTokenPresent=true");
     assertThat(
@@ -598,14 +585,12 @@ class GrpcMlAgentClientTest {
         new MlAgentRequest(
             "tenant-1",
             "org-1",
-            "case-1",
             List.of(
                 new MlAgentRequest.HistoryTurn("user", null),
                 new MlAgentRequest.HistoryTurn("assistant", null),
                 new MlAgentRequest.HistoryTurn("user", "  ")),
             "msg-1",
             "analyst-1",
-            null,
             "corr-1",
             "req-1",
             "hi",
@@ -616,7 +601,7 @@ class GrpcMlAgentClientTest {
         .expectNext(CHUNK, DONE)
         .verifyComplete();
 
-    AskCaseManagerRequest sent = capturedRequest.get();
+    AskPolicyManagerRequest sent = capturedRequest.get();
     assertThat(sent.getHistory(0).getUser().getPrompt()).isEmpty();
     assertThat(sent.getHistory(1).getAgent().getText()).isEmpty();
     assertThat(sent.getHistory(2).getUser().getPrompt()).isEqualTo("  ");

@@ -17,8 +17,7 @@ import org.springframework.web.server.ServerWebExchange;
  * ChatController} requires no change at all to pick this up.
  *
  * <p>{@code tenantId}/{@code organization} are read from the {@code X-Tenant-Id}/ {@code X-Org-Id}
- * request headers, same as {@link com.pmbotservice.context.HeaderBasedRequestContextResolver} —
- * {@code caseId} is still sourced from the request body, unchanged from today's contract.
+ * request headers, same as {@link com.pmbotservice.context.HeaderBasedRequestContextResolver}.
  */
 @Component
 @ConditionalOnProperty(prefix = "chatbot.security", name = "mode", havingValue = "BFF_SESSION")
@@ -28,7 +27,7 @@ public class SessionRequestContextResolver implements RequestContextResolver {
   private static final String UNKNOWN_USER = "unknown-user";
 
   @Override
-  public RequestContext resolve(ServerWebExchange exchange, String caseId) {
+  public RequestContext resolve(ServerWebExchange exchange) {
     SessionContext session = exchange.getAttribute(SessionContext.EXCHANGE_ATTRIBUTE);
     String correlationId = exchange.getAttribute(CorrelationIdFilter.CORRELATION_ID_ATTRIBUTE);
     // session is only ever absent here if chatbot.security.fail-open-on-redis-error
@@ -47,13 +46,12 @@ public class SessionRequestContextResolver implements RequestContextResolver {
           UNKNOWN_USER);
     }
     log.info(
-        "REQUEST_CONTEXT_RESOLVED source=bff-session tenantId={} organization={} caseId={}"
+        "REQUEST_CONTEXT_RESOLVED source=bff-session tenantId={} organization={}"
             + " userId={} accessTokenPresent={}",
         tenantId,
         organization,
-        caseId,
         userId,
         accessToken != null);
-    return new RequestContext(tenantId, caseId, organization, userId, correlationId, accessToken);
+    return new RequestContext(tenantId, organization, userId, correlationId, accessToken);
   }
 }

@@ -15,12 +15,13 @@ import org.springframework.http.codec.ServerSentEvent;
  *
  * <ul>
  *   <li>{@code event:} is the name of the {@code AnswerEvent} oneof field that is set ({@code
- *       chunk}, {@code tool_call}, {@code tool_result}, {@code payload}, {@code done}, {@code
- *       error}, {@code ping}), read from the protobuf descriptor — never a name of our own.
+ *       chunk}, {@code tool_call}, {@code tool_result}, {@code payload}, {@code generated_policy},
+ *       {@code done}, {@code error}, {@code ping}), read from the protobuf descriptor — never a
+ *       name of our own.
  *   <li>{@code data:} is the whole {@code AnswerEvent} in the canonical proto3 JSON mapping, with
  *       the original {@code .proto} field names preserved ({@code tool_call_id}, not {@code
  *       toolCallId}), the original nesting (e.g. {@code
- *       {"payload":{"case_manager_answer_payload":{...}}}}), enum values as their proto names
+ *       {"payload":{"policy_manager_answer_payload":{...}}}}), enum values as their proto names
  *       ({@code STATUS_OK}), and fields at their default value still printed rather than omitted,
  *       so no field is ever silently missing. Per that mapping, {@code int64} values ({@code ms},
  *       {@code row_count}, {@code latency_ms}, {@code tokens_in}, {@code tokens_out}) are JSON
