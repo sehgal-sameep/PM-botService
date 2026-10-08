@@ -41,7 +41,7 @@ COPY --from=build /workspace/app.jar ./app.jar
 RUN chown spring:spring /app/app.jar
 USER spring
 
-EXPOSE 8079
+EXPOSE 8080
 
 # Override at `docker run`/orchestrator level, e.g. -e JAVA_OPTS="-Xmx512m -Xms256m".
 # Left blank by default: the JVM's container-aware ergonomics (default since JDK 10+)
@@ -55,7 +55,7 @@ ENV JAVA_OPTS=""
 # See README.md's "Configuration" and "Authentication" sections for the full property list.
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
-    CMD curl -fsS "http://localhost:${SERVER_PORT:-8079}/actuator/health/liveness" || exit 1
+    CMD curl -fsS "http://localhost:${SERVER_PORT:-8080}/actuator/health/liveness" || exit 1
 
 # `exec`, not a bare shell command, so `java` runs as PID 1 and receives SIGTERM
 # directly — required for spring.lifecycle's graceful shutdown (server.shutdown:
