@@ -37,7 +37,7 @@ continuation, single-quoted JSON). On Windows:
   JSON body in a file so you don't have to fight PowerShell quoting:
   ```powershell
   '{"message":"Which policies are currently active?"}' | Out-File -Encoding ascii body.json
-  curl.exe -N -X POST "http://localhost:8080/back-office-ai/pm/api/v1/chat/messages" `
+  curl.exe -N -X POST "http://localhost:8080/back-office-ai-pm/api/v1/chat/messages" `
     -H "Content-Type: application/json" -H "Accept: text/event-stream" `
     -H "X-Tenant-Id: tenant-123" -H "X-Org-Id: org-123" `
     --data-binary "@body.json"
@@ -69,7 +69,7 @@ unknown fields are ignored.)
 New conversation:
 
 ```bash
-curl -N -i -X POST "http://localhost:8080/back-office-ai/pm/api/v1/chat/messages" \
+curl -N -i -X POST "http://localhost:8080/back-office-ai-pm/api/v1/chat/messages" \
   -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
   -H "X-Correlation-Id: <your-id>" \
@@ -83,7 +83,7 @@ Continue the conversation: resend the transcript so far as `history`, oldest tur
 first:
 
 ```bash
-curl -N -X POST "http://localhost:8080/back-office-ai/pm/api/v1/chat/messages" \
+curl -N -X POST "http://localhost:8080/back-office-ai-pm/api/v1/chat/messages" \
   -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
   -H "X-User-Id: <analyst-id>" \
@@ -111,7 +111,7 @@ add the cookie. `X-Tenant-Id` must be the tenant the session belongs to, because
 part of the Redis key.
 
 ```bash
-curl -N -i -X POST "http://localhost:8080/back-office-ai/pm/api/v1/chat/messages" \
+curl -N -i -X POST "http://localhost:8080/back-office-ai-pm/api/v1/chat/messages" \
   -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
   -H "X-Correlation-Id: <your-id>" \
@@ -139,7 +139,7 @@ Auth failures come back as plain JSON before any stream starts:
 Put a keyword anywhere in `message` to simulate each outcome:
 
 ```bash
-BASE="http://localhost:8080/back-office-ai/pm/api/v1/chat/messages"
+BASE="http://localhost:8080/back-office-ai-pm/api/v1/chat/messages"
 H=(-H "Content-Type: application/json" -H "Accept: text/event-stream" -H "X-Tenant-Id: t" -H "X-Org-Id: o")
 
 curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"hello"}'                    # normal answer (payload)
@@ -159,12 +159,12 @@ curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"trigger:timeout"}'          # 
 
 ```bash
 # blank message -> 400 VALIDATION_ERROR "message: message must not be blank"
-curl -s -X POST "http://localhost:8080/back-office-ai/pm/api/v1/chat/messages" \
+curl -s -X POST "http://localhost:8080/back-office-ai-pm/api/v1/chat/messages" \
   -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" \
   -d '{"message":""}'
 
 # missing X-Tenant-Id -> 400 VALIDATION_ERROR "X-Tenant-Id header must not be blank"
-curl -s -X POST "http://localhost:8080/back-office-ai/pm/api/v1/chat/messages" \
+curl -s -X POST "http://localhost:8080/back-office-ai-pm/api/v1/chat/messages" \
   -H "Content-Type: application/json" -H "X-Org-Id: o" \
   -d '{"message":"hi"}'
 ```
@@ -206,7 +206,7 @@ and tenant resolve to a Redis record, without sending a chat message. Full detai
 troubleshooting are in [`SESSION_DEBUG_API.md`](SESSION_DEBUG_API.md).
 
 ```bash
-curl -i "http://localhost:8080/back-office-ai/pm/api/v1/debug/session-lookup" \
+curl -i "http://localhost:8080/back-office-ai-pm/api/v1/debug/session-lookup" \
   -H "X-Correlation-Id: <your-id>" \
   -H "Cookie: SESSION=<session value>" \
   -H "X-Tenant-Id: <tenant>"
@@ -215,7 +215,7 @@ curl -i "http://localhost:8080/back-office-ai/pm/api/v1/debug/session-lookup" \
 PowerShell:
 
 ```powershell
-curl.exe -i "http://localhost:8080/back-office-ai/pm/api/v1/debug/session-lookup" `
+curl.exe -i "http://localhost:8080/back-office-ai-pm/api/v1/debug/session-lookup" `
   -H "Cookie: SESSION=<session value>" `
   -H "X-Tenant-Id: <tenant>"
 ```
