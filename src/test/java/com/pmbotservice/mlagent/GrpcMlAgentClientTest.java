@@ -6,23 +6,29 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.cmbotservice.mlagent.grpc.v1.AnswerEvent;
+import com.cmbotservice.mlagent.grpc.v1.AnswerPayload;
+import com.cmbotservice.mlagent.grpc.v1.AskPolicyManagerRequest;
+import com.cmbotservice.mlagent.grpc.v1.ChatAgentGrpc;
+import com.cmbotservice.mlagent.grpc.v1.Chunk;
+import com.cmbotservice.mlagent.grpc.v1.ConversationTurn;
+import com.cmbotservice.mlagent.grpc.v1.Done;
+import com.cmbotservice.mlagent.grpc.v1.Error;
+import com.cmbotservice.mlagent.grpc.v1.Ping;
+import com.cmbotservice.mlagent.grpc.v1.PolicyCitation;
+import com.cmbotservice.mlagent.grpc.v1.PolicyDefinition;
+import com.cmbotservice.mlagent.grpc.v1.PolicyImpact;
+import com.cmbotservice.mlagent.grpc.v1.PolicyManagerAnswerPayload;
+import com.cmbotservice.mlagent.grpc.v1.PolicyManagerContext;
+import com.cmbotservice.mlagent.grpc.v1.PolicyMetrics;
+import com.cmbotservice.mlagent.grpc.v1.PolicyRecommendation;
+import com.cmbotservice.mlagent.grpc.v1.SimulationSummary;
+import com.cmbotservice.mlagent.grpc.v1.ToolCall;
+import com.cmbotservice.mlagent.grpc.v1.ToolResult;
 import com.pmbotservice.common.ErrorCode;
 import com.pmbotservice.common.MlAgentRejectedException;
 import com.pmbotservice.common.MlAgentUnavailableException;
 import com.pmbotservice.context.RequestContext;
-import com.pmbotservice.mlagent.grpc.v1.AnswerEvent;
-import com.pmbotservice.mlagent.grpc.v1.AnswerPayload;
-import com.pmbotservice.mlagent.grpc.v1.AskPolicyManagerRequest;
-import com.pmbotservice.mlagent.grpc.v1.ChatAgentGrpc;
-import com.pmbotservice.mlagent.grpc.v1.Chunk;
-import com.pmbotservice.mlagent.grpc.v1.ConversationTurn;
-import com.pmbotservice.mlagent.grpc.v1.Done;
-import com.pmbotservice.mlagent.grpc.v1.Error;
-import com.pmbotservice.mlagent.grpc.v1.GeneratedPolicy;
-import com.pmbotservice.mlagent.grpc.v1.Ping;
-import com.pmbotservice.mlagent.grpc.v1.PolicyManagerAnswerPayload;
-import com.pmbotservice.mlagent.grpc.v1.ToolCall;
-import com.pmbotservice.mlagent.grpc.v1.ToolResult;
 import com.pmbotservice.security.SessionContext;
 import io.grpc.ManagedChannel;
 import io.grpc.Metadata;
@@ -122,26 +128,72 @@ class GrpcMlAgentClientTest {
         "corr-1",
         "req-1",
         "hello",
+        null,
         accessToken);
   }
 
   private static final PolicyManagerAnswerPayload VALID_PAYLOAD =
       PolicyManagerAnswerPayload.newBuilder()
-          .addKeySignals(
-              PolicyManagerAnswerPayload.KeySignal.newBuilder()
-                  .setSignal("s")
-                  .addCitations("c1")
-                  .build())
+          .setStatus(PolicyManagerAnswerPayload.Status.STATUS_EVALUATED)
+          .setRecommendation(
+              PolicyRecommendation.newBuilder()
+                  .setCandidateId("candidate-01")
+                  .setCandidateVersion("2")
+                  .setChangeType(PolicyRecommendation.ChangeType.CHANGE_TYPE_THRESHOLD_UPDATE)
+                  .addTargetPolicyIds("policy-17")
+                  .setTitle("t")
+                  .setDescription("d")
+                  .setRationale("r")
+                  .setPolicyDefinition(
+                      PolicyDefinition.newBuilder()
+                          .setFormat("outseer-policy-dsl")
+                          .setSchemaVersion("1")
+                          .setDefinition("{}"))
+                  .addCitationIds("c1")
+                  .addAssumptions("a")
+                  .setConfidence(0.72))
+          .setSimulation(
+              SimulationSummary.newBuilder()
+                  .setSimulationId("sim-01")
+                  .setStatus(SimulationSummary.Status.STATUS_COMPLETED)
+                  .setCandidateId("candidate-01")
+                  .setCandidateVersion("2")
+                  .setBaselinePolicySetId("baseline-01")
+                  .setBaselinePolicySetVersion("7")
+                  .setSnapshotId("evaluation-01")
+                  .setBaselineMetrics(
+                      PolicyMetrics.newBuilder()
+                          .setTruePositives(80)
+                          .setFalsePositives(180)
+                          .setTrueNegatives(9720)
+                          .setFalseNegatives(20)
+                          .setRecall(0.8))
+                  .setCandidateMetrics(
+                      PolicyMetrics.newBuilder()
+                          .setTruePositives(90)
+                          .setFalsePositives(200)
+                          .setTrueNegatives(9700)
+                          .setFalseNegatives(10)
+                          .setRecall(0.9))
+                  .addLimitations("exploratory evaluation")
+                  .setImpact(
+                      PolicyImpact.newBuilder()
+                          .setFraudCaptureUplift(0.1)
+                          .setFalsePositiveDelta(20)
+                          .setNetImpact(1.5)))
           .addCitations(
-              PolicyManagerAnswerPayload.Citation.newBuilder()
-                  .setId("c1")
-                  .setSource("APP_EVENT_LOG")
-                  .addFields("risk_score")
-                  .build())
+              PolicyCitation.newBuilder()
+                  .setCitationId("c1")
+                  .setSourceTool("AgenticGetPolicyContext")
+                  .setSourceRecordId("segment-01")
+                  .setSnapshotId("discovery-01")
+                  .addFieldPaths("missedFraudCount"))
+          .addFollowUpQuestions("q")
+          .addLimitations("l")
           .build();
 
   @Test
-  void everyEventType_isForwardedAsTheIdenticalProtoMessage_inOrder_includingPingAndPolicy()
+  void everyEventType_isForwardedAsTheIdenticalProtoMessage_inOrder_includingPingAndPayload()
       throws IOException {
     List<AnswerEvent> sent =
         List.of(
@@ -165,10 +217,6 @@ class GrpcMlAgentClientTest {
             AnswerEvent.newBuilder().setChunk(Chunk.newBuilder().setDelta(" world")).build(),
             AnswerEvent.newBuilder()
                 .setPayload(AnswerPayload.newBuilder().setPolicyManagerAnswerPayload(VALID_PAYLOAD))
-                .build(),
-            AnswerEvent.newBuilder()
-                .setGeneratedPolicy(
-                    GeneratedPolicy.newBuilder().setPolicyJson("{\"name\":\"p1\",\"rules\":[]}"))
                 .build(),
             AnswerEvent.newBuilder()
                 .setDone(
@@ -288,18 +336,102 @@ class GrpcMlAgentClientTest {
     assertThat(sent.getHistoryList()).hasSize(2);
     assertThat(sent.getHistory(0).getUser().getPrompt()).isEqualTo("hi");
     assertThat(sent.getHistory(1).getAgent().getText()).isEqualTo("hello");
+    // No policy context supplied -> the message field is left unset, not sent empty.
+    assertThat(sent.hasPolicyContext()).isFalse();
   }
 
   @Test
-  void payload_withKeySignalMissingCitation_isStillForwardedAsIs_notRejected() throws IOException {
+  void policyContext_isMappedToPolicyManagerContext_withOnlySuppliedFieldsSet() throws IOException {
+    MlAgentRequest withContext =
+        new MlAgentRequest(
+            "tenant-1",
+            "org-1",
+            List.of(),
+            "msg-1",
+            "analyst-1",
+            "corr-1",
+            "req-1",
+            "hi",
+            new MlAgentRequest.PolicyContext(
+                "baseline-01",
+                "7",
+                "scenario-01",
+                "case-9",
+                "candidate-01",
+                "3",
+                "sim-01",
+                List.of("indicator-01", "indicator-02"),
+                "Fraud on new devices rose 18%."),
+            null);
+    GrpcMlAgentClient client = startStreamingClient();
+
+    client.streamResponse(withContext).blockLast(Duration.ofSeconds(5));
+
+    assertThat(capturedRequest.get().getPolicyContext())
+        .isEqualTo(
+            PolicyManagerContext.newBuilder()
+                .setPolicySetId("baseline-01")
+                .setPolicySetVersion("7")
+                .setScenarioId("scenario-01")
+                .setCaseId("case-9")
+                .setCandidateId("candidate-01")
+                .setCandidateVersion("3")
+                .setSimulationId("sim-01")
+                .addMissedFraudIndicatorIds("indicator-01")
+                .addMissedFraudIndicatorIds("indicator-02")
+                .setHistoricalSummary("Fraud on new devices rose 18%.")
+                .build());
+  }
+
+  @Test
+  void partialPolicyContext_leavesUnsuppliedFieldsUnset_includingOptionalFieldPresence()
+      throws IOException {
+    MlAgentRequest partial =
+        new MlAgentRequest(
+            "tenant-1",
+            "org-1",
+            List.of(),
+            "msg-1",
+            "analyst-1",
+            "corr-1",
+            "req-1",
+            "hi",
+            new MlAgentRequest.PolicyContext(
+                "baseline-01", null, "scenario-01", null, null, null, null, List.of(), null),
+            null);
+    GrpcMlAgentClient client = startStreamingClient();
+
+    client.streamResponse(partial).blockLast(Duration.ofSeconds(5));
+
+    PolicyManagerContext sent = capturedRequest.get().getPolicyContext();
+    assertThat(capturedRequest.get().hasPolicyContext()).isTrue();
+    assertThat(sent.getPolicySetId()).isEqualTo("baseline-01");
+    assertThat(sent.getScenarioId()).isEqualTo("scenario-01");
+    assertThat(sent.getPolicySetVersion()).isEmpty();
+    assertThat(sent.hasCaseId()).isFalse();
+    assertThat(sent.hasCandidateId()).isFalse();
+    assertThat(sent.hasCandidateVersion()).isFalse();
+    assertThat(sent.hasSimulationId()).isFalse();
+    assertThat(sent.getMissedFraudIndicatorIdsList()).isEmpty();
+    assertThat(sent.hasHistoricalSummary()).isFalse();
+  }
+
+  @Test
+  void payload_violatingContractRules_isStillForwardedAsIs_notRejected() throws IOException {
+    // Unspecified status, an unresolvable citation id, and metrics on a non-completed run:
+    // this backend does not check the payload's content, so it is never altered or dropped.
     AnswerEvent payloadEvent =
         AnswerEvent.newBuilder()
             .setPayload(
                 AnswerPayload.newBuilder()
                     .setPolicyManagerAnswerPayload(
                         PolicyManagerAnswerPayload.newBuilder()
-                            .addKeySignals(
-                                PolicyManagerAnswerPayload.KeySignal.newBuilder().setSignal("s"))))
+                            .setRecommendation(
+                                PolicyRecommendation.newBuilder().addCitationIds("missing"))
+                            .setSimulation(
+                                SimulationSummary.newBuilder()
+                                    .setStatus(SimulationSummary.Status.STATUS_RUNNING)
+                                    .setBaselineMetrics(PolicyMetrics.newBuilder()))))
             .build();
     GrpcMlAgentClient client =
         startClientWith(
@@ -309,6 +441,59 @@ class GrpcMlAgentClientTest {
             });
 
     StepVerifier.create(client.streamResponse(request())).expectNext(payloadEvent).verifyComplete();
+  }
+
+  @Test
+  void payload_withADefinitionThatIsNotARule_isStillForwardedAsIs() throws IOException {
+    AnswerEvent payloadEvent =
+        AnswerEvent.newBuilder()
+            .setPayload(
+                AnswerPayload.newBuilder()
+                    .setPolicyManagerAnswerPayload(
+                        PolicyManagerAnswerPayload.newBuilder()
+                            .setStatus(PolicyManagerAnswerPayload.Status.STATUS_CANDIDATE_READY)
+                            .setRecommendation(
+                                PolicyRecommendation.newBuilder()
+                                    .setPolicyDefinition(
+                                        PolicyDefinition.newBuilder()
+                                            .setFormat("outseer-policy-dsl")
+                                            .setDefinition("risk_score >= 700")))))
+            .build();
+    GrpcMlAgentClient client =
+        startClientWith(
+            observer -> {
+              observer.onNext(payloadEvent);
+              observer.onCompleted();
+            });
+
+    StepVerifier.create(client.streamResponse(request())).expectNext(payloadEvent).verifyComplete();
+  }
+
+  @Test
+  void eventFromRemovedGeneratedPolicyField_isIgnoredRatherThanErroring() throws IOException {
+    // An agent still on the pre-contract proto could send field 8 (generated_policy). It is now
+    // reserved: it parses as an unknown field, so the event's oneof is unset and it is skipped.
+    AnswerEvent legacy =
+        AnswerEvent.newBuilder()
+            .setUnknownFields(
+                com.google.protobuf.UnknownFieldSet.newBuilder()
+                    .addField(
+                        8,
+                        com.google.protobuf.UnknownFieldSet.Field.newBuilder()
+                            .addLengthDelimited(com.google.protobuf.ByteString.copyFromUtf8(""))
+                            .build())
+                    .build())
+            .build();
+    AnswerEvent done = AnswerEvent.newBuilder().setDone(Done.newBuilder()).build();
+    GrpcMlAgentClient client =
+        startClientWith(
+            observer -> {
+              observer.onNext(legacy);
+              observer.onNext(done);
+              observer.onCompleted();
+            });
+
+    StepVerifier.create(client.streamResponse(request())).expectNext(done).verifyComplete();
   }
 
   @Test
@@ -413,7 +598,7 @@ class GrpcMlAgentClientTest {
   void absentOrganizationAndOperatorId_areNotSetOnTheProtoRequest() throws IOException {
     MlAgentRequest withoutIds =
         new MlAgentRequest(
-            "tenant-1", null, List.of(), "msg-1", null, "corr-1", "req-1", "hi", null);
+            "tenant-1", null, List.of(), "msg-1", null, "corr-1", "req-1", "hi", null, null);
     GrpcMlAgentClient client =
         startClientWith(
             observer -> {
@@ -440,6 +625,7 @@ class GrpcMlAgentClientTest {
             "corr-1",
             "req-1",
             "hi",
+            null,
             null);
     GrpcMlAgentClient client =
         startClientWith(
@@ -594,6 +780,7 @@ class GrpcMlAgentClientTest {
             "corr-1",
             "req-1",
             "hi",
+            null,
             null);
     GrpcMlAgentClient client = startStreamingClient();
 

@@ -1,5 +1,6 @@
 package com.pmbotservice.service;
 
+import com.cmbotservice.mlagent.grpc.v1.AnswerEvent;
 import com.pmbotservice.common.ErrorCode;
 import com.pmbotservice.common.LogSanitizer;
 import com.pmbotservice.common.MlAgentCommunicationException;
@@ -14,11 +15,11 @@ import com.pmbotservice.context.MdcContext;
 import com.pmbotservice.context.RequestContext;
 import com.pmbotservice.mlagent.MlAgentClient;
 import com.pmbotservice.mlagent.MlAgentRequest;
-import com.pmbotservice.mlagent.grpc.v1.AnswerEvent;
 import com.pmbotservice.sse.ServiceErrorEvent;
 import com.pmbotservice.sse.SseEvents;
 import com.pmbotservice.web.dto.ChatRequest;
 import com.pmbotservice.web.dto.HistoryTurn;
+import com.pmbotservice.web.dto.PolicyContext;
 import io.github.resilience4j.bulkhead.Bulkhead;
 import io.github.resilience4j.bulkhead.BulkheadFullException;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
@@ -108,14 +109,15 @@ public class ChatOrchestrationServiceImpl implements ChatOrchestrationService {
     // contain personal data, so their content is never logged (see LogSanitizer).
     log.info(
         "CHAT_REQUEST_RECEIVED messageId={} userId={} organization={} requestId={}"
-            + " messageLength={} historyTurns={} operatorIdPresent={}",
+            + " messageLength={} historyTurns={} operatorIdPresent={} policyContextPresent={}",
         messageId,
         context.userId(),
         context.organization(),
         request.requestId() == null ? "<absent>" : request.requestId(),
         request.message().length(),
         request.history() == null ? 0 : request.history().size(),
-        request.operatorId() != null);
+        request.operatorId() != null,
+        request.policyContext() != null);
     metrics.connectionOpened();
 
     boolean tooLong = request.message().length() > chatProperties.maxMessageLength();
@@ -191,6 +193,7 @@ public class ChatOrchestrationServiceImpl implements ChatOrchestrationService {
             context.correlationId(),
             request.requestId(),
             request.message(),
+            toMlAgentPolicyContext(request.policyContext()),
             context.accessToken());
 
     AtomicBoolean firstEventSeen = new AtomicBoolean(false);
@@ -294,6 +297,22 @@ public class ChatOrchestrationServiceImpl implements ChatOrchestrationService {
         .toList();
   }
 
+  private static MlAgentRequest.PolicyContext toMlAgentPolicyContext(PolicyContext policyContext) {
+    if (policyContext == null) {
+      return null;
+    }
+    return new MlAgentRequest.PolicyContext(
+        policyContext.policySetId(),
+        policyContext.policySetVersion(),
+        policyContext.scenarioId(),
+        policyContext.caseId(),
+        policyContext.candidateId(),
+        policyContext.candidateVersion(),
+        policyContext.simulationId(),
+        policyContext.missedFraudIndicatorIds(),
+        policyContext.historicalSummary());
+  }
+
   private static boolean isRetryable(Throwable ex) {
     // Connection-level failures and "reached the agent but it said something went
     // wrong server-side" are retryable. Timeouts, malformed responses, explicit
@@ -360,16 +379,11 @@ public class ChatOrchestrationServiceImpl implements ChatOrchestrationService {
               evt.getToolResult().hasRowCount() ? evt.getToolResult().getRowCount() : "<unset>");
       case PAYLOAD ->
           log.info(
-              "ML_EVENT_PAYLOAD messageId={} payloadType={} keySignals={} citations={}",
+              "ML_EVENT_PAYLOAD messageId={} payloadType={} status={} citations={}",
               messageId,
               evt.getPayload().getPayloadCase(),
-              evt.getPayload().getPolicyManagerAnswerPayload().getKeySignalsCount(),
+              evt.getPayload().getPolicyManagerAnswerPayload().getStatus(),
               evt.getPayload().getPolicyManagerAnswerPayload().getCitationsCount());
-      case GENERATED_POLICY ->
-          log.info(
-              "ML_EVENT_GENERATED_POLICY messageId={} policyJsonLength={}",
-              messageId,
-              evt.getGeneratedPolicy().getPolicyJson().length());
       case DONE ->
           log.info(
               "ML_EVENT_DONE messageId={} stopReason={} latencyMs={} tokensIn={} tokensOut={}",

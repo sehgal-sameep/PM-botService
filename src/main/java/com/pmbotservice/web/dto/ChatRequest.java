@@ -9,10 +9,11 @@ import java.util.List;
 /**
  * The single request shape for this stateless orchestrator: everything the ML Agent needs for one
  * message, self-contained. There is nothing to look up server-side — {@code history} is just
- * forwarded, not validated against any stored record. A Policy Manager conversation is plain
- * question/answer. {@code tenantId}/{@code organization} are <b>not</b> here — the frontend sends
- * those as the {@code X-Tenant-Id}/{@code X-Org-Id} request headers instead (see {@code
- * RequestContextResolver}), not the body.
+ * forwarded, not validated against any stored record. {@code tenantId}/{@code organization} are
+ * <b>not</b> here — the frontend sends those as the {@code X-Tenant-Id}/{@code X-Org-Id} request
+ * headers instead (see {@code RequestContextResolver}), not the body. Every other field the ML
+ * Agent contract asks for ({@code operator_id}, {@code policy_context}) is taken from this body and
+ * forwarded as-is — this backend derives none of them.
  */
 public record ChatRequest(
     @Size(max = 50, message = "history must contain at most 50 turns")
@@ -37,22 +38,33 @@ public record ChatRequest(
     @Size(max = 200, message = "operatorId must be at most 200 characters")
         @Schema(
             description =
-                "Optional identifier of the operator making the request, forwarded as-is to the "
-                    + "ML Agent (operator_id), only when sent. Never defaulted, and never filled "
-                    + "from the X-User-Id header or the BFF session.",
-            example = "analyst-1",
+                "Optional identifier of the authenticated operator making the request, forwarded"
+                    + " as-is to the ML Agent (operator_id), only when sent. Never defaulted, and"
+                    + " never filled from the X-User-Id header or the BFF session.",
+            example = "458272",
             requiredMode = Schema.RequiredMode.NOT_REQUIRED)
         String operatorId,
+    @Valid
+        @Schema(
+            description =
+                "Optional Policy Manager context — baseline policy set, historical scenario, and"
+                    + " any case seed, candidate or simulation being discussed. Forwarded as-is to"
+                    + " the ML Agent (policy_context).",
+            requiredMode = Schema.RequiredMode.NOT_REQUIRED)
+        PolicyContext policyContext,
     @NotBlank(message = "message must not be blank")
         @Size(max = 4000, message = "message must be at most 4000 characters")
         @Schema(
             description =
-                "The user's message — a question about policies, or a request to generate a new "
-                    + "policy. For local testing, the mock ML Agent recognizes the keywords "
-                    + "'trigger:slow', 'trigger:timeout', 'trigger:error', 'trigger:empty', "
-                    + "'trigger:rejected' and 'trigger:generate-policy' anywhere in this text to "
-                    + "simulate that scenario.",
-            example = "Generate a policy that flags high-value transfers to new beneficiaries")
+                "The user's question — e.g. a request to recommend or refine a policy and compare"
+                    + " it with the baseline. For local testing, the mock ML Agent recognizes the"
+                    + " keywords 'trigger:slow', 'trigger:timeout', 'trigger:error',"
+                    + " 'trigger:agent-error', 'trigger:empty', 'trigger:rejected',"
+                    + " 'trigger:needs-input', 'trigger:insufficient-data',"
+                    + " 'trigger:simulation-pending', 'trigger:evaluated' and"
+                    + " 'trigger:simulation-failed' anywhere in this text to simulate that scenario.",
+            example =
+                "Recommend a policy for missed fraud and compare it with our current policies.")
         String message) {
 
   /** A blank {@code operatorId} means "not sent" — normalized to {@code null}, never forwarded. */

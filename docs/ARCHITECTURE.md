@@ -60,7 +60,7 @@ rewrite from zero.
 Frontend (curl/Swagger)
    │  POST /api/v1/chat/messages   (Accept: text/event-stream)
    │  Headers: X-Tenant-Id (required), X-Org-Id (optional)
-   │  Body: { history?, requestId?, operatorId?, message }   (unknown fields ignored)
+   │  Body: { history?, requestId?, operatorId?, policyContext?, message }   (unknown fields ignored)
    ▼
 ChatController
    → Bean Validation (WebExchangeBindException → 400, pre-stream — the only way a
@@ -72,8 +72,9 @@ ChatController
    ▼
 ChatOrchestrationService (fully reactive — no thread, no blocking call, anywhere here)
    → message-length check (runtime-configurable ceiling)
-   → builds MlAgentRequest (history forwarded verbatim; there is no continuation/
-   │   conversationId to echo — the contract has neither)
+   → builds MlAgentRequest (history, operatorId and policyContext forwarded verbatim
+   │   from the body; there is no continuation/conversationId to echo — the contract
+   │   has neither)
    → mlAgentClient.streamResponse(...)
        .transformDeferred(CircuitBreakerOperator)
        .transformDeferred(BulkheadOperator)
@@ -87,7 +88,7 @@ ChatOrchestrationService (fully reactive — no thread, no blocking call, anywhe
    ▼
 MockMlAgentClient / GrpcMlAgentClient (impl of MlAgentClient)
    → streams the agent's own AnswerEvents (chunk/tool_call/tool_result/payload/
-   │   generated_policy/done/error/ping) as received — no identifier is ever revealed; resending `history` on
+   │   done/error/ping) as received — no identifier is ever revealed; resending `history` on
    │   the next request is the caller's only resumption mechanism
    → (real client) never buffers the full response — a straight Flux, gRPC → Netty
 ```
@@ -104,19 +105,25 @@ Agent's own contract, not of either transport.
 
 ### The real ML Agent request/response contract
 
-A 3-file protobuf contract (`src/main/proto/common.proto`, `policy_manager.proto`,
-`chat_agent.proto` — see §6 for the live schema), carried over gRPC's server-streaming
+A 3-file protobuf contract (`src/main/proto/orchestrator/v1/common.proto`,
+`src/main/proto/policy_manager/v1/policy_manager.proto` — both Thoughtful Labs' finalized
+files, byte-identical to the copies in `docs/` — and our own
+`src/main/proto/orchestrator/v1/chat_agent.proto`; see §6 for the live schema), carried over gRPC's server-streaming
 `ChatAgent.AskPolicyManager(AskPolicyManagerRequest) returns (stream AnswerEvent)` RPC.
-A Policy Manager conversation is plain question/answer, and `AnswerEvent` has a
-`generated_policy` arm for newly generated policies. The proto package is
-`pmbotservice.mlagent.v1` — it is part of the gRPC wire path
-(`/pmbotservice.mlagent.v1.ChatAgent/AskPolicyManager`), so it must match the ML
+A Policy Manager conversation asks the agent to recommend new or improved fraud
+policies, backtest them against a baseline, and explain the comparison: the request
+carries a `policy_context`, and the answer is streamed text plus one structured
+`payload` with a `status`. The proto package is
+`cmbotservice.mlagent.v1` (Java `com.cmbotservice.mlagent.grpc.v1`), as declared in the
+finalized files — it is part of the gRPC wire path
+(`/cmbotservice.mlagent.v1.ChatAgent/AskPolicyManager`), so it must match the ML
 Agent's. This contract superseded an earlier, single-file contract
 (`Chat`/`ChatRequest`/`ChatEvent`, originally itself a translation of a documented
 `POST /v1/chat` + SSE contract) — this section describes the current shape only; shown here as JSON for readability, field names map 1:1 to the
 `.proto` message fields (`camelCase` JSON ↔ `snake_case` proto).
 
-Request (`AskPolicyManagerRequest` — `request_context`, `operator_id`, `prompt`, `history`):
+Request (`AskPolicyManagerRequest` — `request_context` (1), `operator_id` (2), `prompt` (3),
+`policy_context` (4), `history` (5)):
 
 ```json
 {
@@ -127,9 +134,18 @@ Request (`AskPolicyManagerRequest` — `request_context`, `operator_id`, `prompt
     "requestId": "<this backend's own correlation id>"
   },
   "operatorId": "analyst-1",
-  "prompt": "Which rules make up the velocity policy?",
+  "prompt": "Backtest it against the baseline.",
+  "policyContext": {
+    "policySetId": "baseline-01",
+    "policySetVersion": "7",
+    "scenarioId": "scenario-01",
+    "candidateId": "candidate-01",
+    "candidateVersion": "1",
+    "missedFraudIndicatorIds": ["indicator-01"],
+    "historicalSummary": "Card-not-present fraud on new devices rose 18% over the last 30 days."
+  },
   "history": [
-    { "user": { "prompt": "Which policies are currently active?" } },
+    { "user": { "prompt": "Recommend a policy for missed fraud and compare it with our current policies." } },
     { "agent": { "text": "..." } }
   ]
 }
@@ -154,14 +170,26 @@ otherwise interpret it. `requestContext
 the contract's own "groups related requests for tracing and metrics" — it carries no
 server-side state); `requestContext.requestId` is this backend's *own* correlation id
 (from `X-Correlation-Id`/generated), not the caller's `requestId` field, despite the
-similarly-named fields on both sides. `operatorId` comes only from the frontend's
-optional `operatorId` body field and is left unset when not sent — it is never
-defaulted, and `RequestContext.userId()` (`X-User-Id`/session username) is used for logging only,
-never forwarded. The product/prod-auth path
+similarly-named fields on both sides. `operator_id` (the PM contract's "authenticated
+operator, populated by the backend") is the optional `operatorId` body field, forwarded
+as-is only when sent — never defaulted, and never filled from `X-User-Id` or the BFF
+session. Like every field the ML Agent contract asks for, the frontend supplies it and
+this backend only relays it.
+
+`policy_context` (`PolicyManagerContext`: `string policy_set_id` (1), `string
+policy_set_version` (2), `string scenario_id` (3), `optional string case_id` (4),
+`optional string candidate_id` (5), `optional string candidate_version` (6), `optional
+string simulation_id` (7), `repeated string missed_fraud_indicator_ids` (8), `optional
+string historical_summary` (9)) comes from the optional `policyContext` body object
+(`PolicyContext` DTO → `MlAgentRequest.PolicyContext`); only supplied fields are set
+(the `optional` ones stay absent rather than present-but-empty),
+and the message is left unset when `policyContext` is absent. This backend never
+interprets or range-checks the values, resolves defaults or checks the resources exist — when the agent can't resolve an
+unambiguous baseline/scenario it answers `STATUS_NEEDS_INPUT`. The product/prod-auth path
 (`context_token` on the old contract) has no equivalent field at all in this finalized
 contract — moot, not merely unwired.
 
-Eight event types (`AnswerEvent`), an unset or unrecognised `event` oneof arm MUST be
+Seven event types (`AnswerEvent`), an unset or unrecognised `event` oneof arm MUST be
 (and is) silently ignored per the contract, never treated as an error:
 
 | Event | Payload | Cardinality |
@@ -169,8 +197,7 @@ Eight event types (`AnswerEvent`), an unset or unrecognised `event` oneof arm MU
 | `chunk` | `{ delta }` | many — streaming answer text |
 | `tool_call` | `{ tool_call_id, name, args_json }` | 0..n |
 | `tool_result` | `{ tool_call_id, status, ms, row_count? }` | one per `tool_call` |
-| `payload` | structured Policy Manager analysis (below), wrapped in a module-union `AnswerPayload` oneof | at most one, before `done` |
-| `generated_policy` | `{ policy_json }` — a newly generated policy, serialized as a JSON string (below) | 0..n, when the user asked for a new policy; not terminal |
+| `payload` | structured Policy Manager result (below), wrapped in a module-union `AnswerPayload` oneof | exactly one on a successful turn, before `done` |
 | `done` | `{ stop_reason, latency_ms, tokens_in, tokens_out }` | one, terminal |
 | `error` | `{ code, retryable }` | terminal |
 | `ping` | (empty) | 0..n — pure transport keepalive |
@@ -178,33 +205,71 @@ Eight event types (`AnswerEvent`), an unset or unrecognised `event` oneof arm MU
 Every one of these is forwarded to the frontend unchanged (§5).
 
 `payload` (`PolicyManagerAnswerPayload`, the `policy_manager_answer_payload` arm —
-`AnswerPayload` field 1):
+`AnswerPayload` field **2**; field 1 is reserved for the shared contract's
+`case_manager_answer_payload`, per the PM contract: "using a new, unused field number.
+Preserve the existing Case Manager field"). JSON is printed in field-number order:
 
 ```json
 {
-  "key_signals": [{ "signal": "...", "citations": ["pol-2"] }],
-  "citations": [{ "id": "pol-2", "source": "searchPolicies", "fields": ["policies[1].rules"] }]
+  "status": "STATUS_CANDIDATE_READY",
+  "recommendation": {
+    "candidate_id": "candidate-01", "candidate_version": "1",
+    "change_type": "CHANGE_TYPE_REFINE", "target_policy_ids": ["policy-17"],
+    "title": "Review high-risk transactions on new devices",
+    "description": "Add a supported device signal to the existing condition.",
+    "rationale": "Historical discovery evidence indicates a gap.",
+    "policy_definition": { "format": "candidate-rule-format", "schema_version": "1.0",
+                           "definition": "{\"position\":5,\"details\":{...},\"conditions\":{...},\"actions\":{...}}" },
+    "citation_ids": ["evidence-01"],
+    "assumptions": [],
+    "confidence": 0.72
+  },
+  "citations": [{ "citation_id": "evidence-01", "source_tool": "AgenticGetPolicyContext",
+                  "source_record_id": "segment-01", "snapshot_id": "discovery-01",
+                  "field_paths": ["missedFraudCount"] }],
+  "follow_up_questions": [],
+  "limitations": []
 }
 ```
 
-`generated_policy` (`GeneratedPolicy { string policy_json = 1; }`, `AnswerEvent` field
-8) is sent when the user asks the agent to generate a new policy. `policy_json` is the
-policy document serialized as JSON (same convention as `ToolCall.args_json`), forwarded
-untouched — the frontend `JSON.parse`s it. It is not terminal: `chunk`s may precede or
-follow it, and the stream still ends with `done` (keep it) or `error` (the client MUST
-discard it along with the rest of the turn). This backend does not inspect it beyond a
-WARN (`GRPC_GENERATED_POLICY_CONTRACT_VIOLATION`) when `policy_json` is empty.
+| Field (number) | Type |
+|---|---|
+| `status` (1) | `Status`: `STATUS_UNSPECIFIED`, `STATUS_NEEDS_INPUT`, `STATUS_CANDIDATE_READY`, `STATUS_SIMULATION_PENDING`, `STATUS_EVALUATED`, `STATUS_INSUFFICIENT_DATA`, `STATUS_SIMULATION_FAILED` |
+| `recommendation` (2) | optional `PolicyRecommendation { string candidate_id (1), string candidate_version (2), ChangeType change_type (3) (CHANGE_TYPE_NEW/REFINE/THRESHOLD_UPDATE/MERGE/RETIRE/NO_CHANGE), repeated string target_policy_ids (4), string title (5), string description (6), string rationale (7), optional PolicyDefinition policy_definition (8) { format, schema_version, definition }, repeated string citation_ids (9), repeated string assumptions (10), optional double confidence (11) in [0, 1] }` |
+| `simulation` (3) | optional `SimulationSummary { string simulation_id (1), Status status (2) (STATUS_QUEUED/RUNNING/COMPLETED/FAILED/CANCELLED), string candidate_id (3), string candidate_version (4), string baseline_policy_set_id (5), string baseline_policy_set_version (6), string snapshot_id (7), optional PolicyMetrics baseline_metrics (8), optional PolicyMetrics candidate_metrics (9) (both only when COMPLETED), repeated string limitations (10), optional PolicyImpact impact (11) (only when COMPLETED) }` |
+| `citations` (4) | repeated `PolicyCitation { string citation_id (1), string source_tool (2), string source_record_id (3), optional string snapshot_id (4), repeated string field_paths (5) }` |
+| `follow_up_questions` (5), `limitations` (6) | repeated string |
 
-This is deliberately much smaller than the earlier contract's `payload` — no
-top-level `answer`, no `summary.narrative`/`entities`/`timeline`, no
-`suggestedResolution` at all. It's an overlay of structured signals/citations on top
-of the answer text (which arrives via `chunk` events), not a duplicate of the answer
-itself. The contract's one invariant — every `key_signal` carries ≥1 citation ("a
-signal without a resolvable citation is a defect, not a soft failure") — is now only
-*observed* by `GrpcMlAgentClient` (a WARN log, §16), not enforced: the payload is
-forwarded as-is either way. The whole `suggestedResolution`/
-resolution-mark validation this doc previously described no longer applies — there is
-no such field to validate.
+`PolicyMetrics { int64 true_positives, false_positives, true_negatives, false_negatives;
+optional double precision, recall, false_positive_rate }` — counts print as JSON strings;
+the rates are omitted (never zero-filled) when undefined.
+
+`PolicyImpact { optional double fraud_capture_uplift; int64 false_positive_delta;
+optional double net_impact }` — candidate minus baseline as computed by the simulator;
+`false_positive_delta` prints as a JSON string, and `net_impact`'s unit is still to be
+agreed (TF Labs open question 4).
+
+**Candidate rule.** `PolicyDefinition.definition` is a serialized rule in the simulation
+engine's candidate rule format v1.0 (`docs/COMPLETE_RULE_FORMAT.md`), with `format`
+`candidate-rule-format` and `schema_version` `1.0` (`CandidateRules.FORMAT`/`SCHEMA_VERSION`).
+The proto keeps it an opaque string (TF Labs' file is used as-is), so the format lives in
+Java: `com.pmbotservice.mlagent.rule.CandidateRule`, a record tree mirroring the spec in
+which **every field is optional** (required-by-spec fields are the simulator's to enforce),
+enum-like values are plain strings, unknown properties are ignored, property names match
+case-insensitively, scalars are coerced and a single value is accepted for a list, and the
+`is`-prefixed booleans also accept their unprefixed spelling. It is used by the mock (which
+builds its `definition` from it) and by `GrpcMlAgentClient` (which logs
+`GRPC_PAYLOAD_RULE_UNPARSEABLE` for a definition that doesn't parse, still forwarding it
+untouched), and published to the frontend as the `CandidateRule` OpenAPI schema.
+`CandidateRulesTest` parses every complete example in the spec. The `format` string is ours:
+TF Labs left `format` free-form (their open question 1), so it must be agreed with them.
+
+Contract behavior (from the PM contract, documented in `policy_manager.proto`): the
+natural-language answer streams through `chunk`; the structured recommendation
+arrives through `payload`; a successful turn emits one `payload`, followed by `done`;
+`error` terminates the stream without `done`; `done` means the chat turn finished — a
+simulation can still be pending. This backend neither checks nor enforces these rules:
+everything is forwarded as-is, and rendering by `status` is the frontend's job.
 
 `done`'s `stop_reason` (`STOP_REASON_COMPLETED` / `STOP_REASON_TRUNCATED`) reaches the
 frontend as the agent's own enum value; this backend no longer collapses it into a
@@ -238,6 +303,58 @@ internal timer, `delayElements`' pending timer, the gRPC `ClientCallStreamObserv
 `cancel(...)`, actually tearing down the underlying HTTP/2 call — see §6) — verified
 live: disconnecting mid-`trigger:slow` logs `SSE_CLIENT_CANCELLED` at INFO with no
 wasted downstream work, no ERROR-level noise.
+
+
+### PM contract alignment (finalized)
+
+Source of truth: Thoughtful Labs' finalized proto files, `docs/orchestrator/v1/common.proto`
+and `docs/policy_manager/v1/policy_manager.proto` (with `docs/README.md`). They are compiled
+**verbatim** from `src/main/proto/` at the same relative paths — `ContractFilesTest` fails the
+build if the two copies ever differ, so to adopt a new TF Labs drop, copy both files over
+unchanged. Everything TF Labs left to us lives in our own `orchestrator/v1/chat_agent.proto`:
+the `AskPolicyManager` rpc and the `policy_manager_answer_payload` arm (`AnswerPayload` field
+2; field 1 stays reserved for the Case Manager arm). The two PDFs in `docs/` are earlier
+drafts and background only; where they differ from the proto files, the proto files win.
+
+The shared `ChatAgent` service also serves `AskCaseManager`; this PM backend deliberately
+doesn't declare it or its types (a gRPC client only needs the methods it calls). The HTTP
+error codes in the agentic interface doc (401…429, 503, 4221/4222) belong to TF Labs' REST
+`POST /v1/chat`, not this gRPC contract.
+
+What adopting the finalized files changed on the wire:
+
+- **Package / method path** is now `cmbotservice.mlagent.v1`
+  (`/cmbotservice.mlagent.v1.ChatAgent/AskPolicyManager`), from `pmbotservice.mlagent.v1`.
+- **`AskPolicyManagerRequest`**: `policy_context` is field 4 and `history` field 5 (swapped).
+- **Versions are strings**: `candidate_version` on `PolicyManagerContext`,
+  `PolicyRecommendation` and `SimulationSummary` (was `int32`).
+- **New fields**: `PolicyManagerContext.missed_fraud_indicator_ids` (8) and
+  `historical_summary` (9); `PolicyRecommendation.assumptions` (10) and `confidence` (11);
+  `SimulationSummary.impact` (11) and the `PolicyImpact` message.
+- **Presence**: `case_id`, `candidate_id`, `simulation_id`, `historical_summary` and
+  `PolicyCitation.snapshot_id` are `optional string`, so "not supplied" is absent rather
+  than `""`.
+- `AnswerEvent`'s old `reserved 8` (`generated_policy`) was dropped along with the package
+  change; nothing on the new package ever used it.
+
+Open questions (TF Labs' own list, `docs/README.md`): the `PolicyDefinition.format` enum,
+the version field types, `simulation_id`/`snapshot_id` alignment with the simulator,
+`net_impact`'s unit, whether the backend or the agent supplies
+`missed_fraud_indicator_ids`/`historical_summary` (this backend forwards whatever the
+frontend sends), SME review APIs, and who implements `AskPolicyManager`.
+
+Other notes:
+
+- **Operator identity:** `operator_id` is forwarded as-is from the frontend's optional
+  `operatorId` body field. The contract calls it the "authenticated operator, populated
+  by the backend", so the frontend must send the authenticated operator's id; this
+  backend does not derive or check it.
+- **Not in the proto** (from the agentic interface's REST `/v1/chat`): `options.runBacktest`,
+  top-level `answer`, `validationStatus`, `review`, `candidateHash`, the comparison
+  `constraintCheck`, `conversationId`/`continuation`, and `contextToken` (the access token
+  still travels as `authorization: Bearer` call metadata).
+- **No status for a purely informational answer** — every successful turn must carry
+  one of the six statuses.
 
 ## 3. Component Diagram
 
@@ -275,7 +392,7 @@ No repository/persistence layer anywhere in this diagram — there is none.
 
 One endpoint: `POST /api/v1/chat/messages`. `tenantId`/`organization` travel as the
 `X-Tenant-Id` (required) / `X-Org-Id` (optional) request headers; `message`/`history`/
-`requestId`/`operatorId` travel in the request body — there is no backend-owned
+`requestId`/`policyContext` travel in the request body — there is no backend-owned
 resource to nest a path segment under. Unknown body fields are ignored, not rejected.
 `history` is optional (omit or send empty to
 start a new conversation, resend the growing transcript to continue one); this backend
@@ -311,8 +428,8 @@ agent's response messages needs only a `.proto` update here, no Java mapping.
 
 | SSE field | Value |
 |---|---|
-| `event:` | the name of the `AnswerEvent` oneof field that is set — `chunk`, `tool_call`, `tool_result`, `payload`, `generated_policy`, `done`, `error`, `ping` — read from the protobuf descriptor (`findFieldByNumber(eventCase.getNumber()).getName()`), never a hand-written mapping |
-| `data:` | the whole `AnswerEvent`, rendered by `JsonFormat.printer().preservingProtoFieldNames().alwaysPrintFieldsWithNoPresence().omittingInsignificantWhitespace()`: original `.proto` field names and nesting (`{"payload":{"policy_manager_answer_payload":{"key_signals":[...]}}}`), enums as proto names, default-valued fields still printed (oneof members such as `row_count` only when set). Per the proto3 JSON mapping, `int64` fields are JSON strings. Handed to Spring as a pre-rendered `String`, which its SSE writer emits without a second JSON encoding |
+| `event:` | the name of the `AnswerEvent` oneof field that is set — `chunk`, `tool_call`, `tool_result`, `payload`, `done`, `error`, `ping` — read from the protobuf descriptor (`findFieldByNumber(eventCase.getNumber()).getName()`), never a hand-written mapping |
+| `data:` | the whole `AnswerEvent`, rendered by `JsonFormat.printer().preservingProtoFieldNames().alwaysPrintFieldsWithNoPresence().omittingInsignificantWhitespace()`: original `.proto` field names and nesting (`{"payload":{"policy_manager_answer_payload":{"status":"STATUS_CANDIDATE_READY","recommendation":{...},"citations":[...],...}}}`), fields in field-number order, enums as proto names, default-valued fields still printed (fields with presence — oneof members such as `row_count`, message fields such as `recommendation`/`simulation`/metrics, and `optional` rates — only when set). Per the proto3 JSON mapping, `int64` fields are JSON strings. Handed to Spring as a pre-rendered `String`, which its SSE writer emits without a second JSON encoding |
 | `id:` | a 0-based frame counter, assigned once via `Flux#index()` — SSE transport metadata, the only thing this backend adds to an agent event |
 
 The canonical proto3 JSON mapping was chosen over a hand-rolled serializer because it
@@ -321,9 +438,8 @@ message — pinned by `SseEventsTest`) and is what any other protobuf consumer w
 produce for the same message.
 
 Forwarded: every event type, including `ping` (keeps intermediaries from idling the
-SSE connection, and resets the idle timeout, §8), `generated_policy`
-(`{"generated_policy":{"policy_json":"<policy as a JSON string>"}}` — the frontend must
-`JSON.parse` `policy_json`; not terminal) and the agent's `error`. Withheld: only
+SSE connection, and resets the idle timeout, §8), `payload` and the agent's `error`.
+Withheld: only
 an `AnswerEvent` with its `event` oneof unset — per the contract, clients MUST ignore it,
 and there is nothing recognisable to forward (unknown fields are not representable in
 proto3 JSON without the schema).
@@ -361,12 +477,17 @@ operators compose declaratively in `ChatOrchestrationService`; the agent's model
 
 **`MockMlAgentClient`** — no threads, no polling loops, nothing that could leak:
 emits the real contract's messages — `Flux.concat(toolTrace, chunks.delayElements(delay),
-Mono.just(payload), Mono.just(done))` for success/slow (a `searchPolicies`
-`tool_call`/`tool_result` pair, policy-themed `chunk`s, a `payload` with a citation on
-every key signal, then `done`), so mock mode puts the exact production wire format on
-the stream; the same shape with a `generated_policy` (a sample policy JSON) in place of
-the `payload` for `trigger:generate-policy` or any message containing "generate"/"create"
-and "policy"; `Flux.error(...)` for
+Mono.just(payload), Mono.just(done))` for success/slow (an `AgenticGetPolicyContext`
+`tool_call`/`tool_result` pair, `chunk`s, one `payload` with `STATUS_CANDIDATE_READY` — a
+`CHANGE_TYPE_REFINE` recommendation whose `policy_definition` is a candidate rule format
+`CandidateRule` scoped to the caller's tenant/org, and a resolvable citation — then
+`done`; baseline/scenario/candidate ids echo the request's `policyContext`, falling back to
+`mock-…` fixtures), so mock mode puts the exact production wire format on the
+stream; the same shape with the matching `payload` status for `trigger:needs-input`,
+`trigger:insufficient-data`, `trigger:simulation-pending` (a running simulation),
+`trigger:evaluated` (a completed simulation with baseline/candidate metrics from the
+contract's illustrative example) and `trigger:simulation-failed`; every ID is a labeled
+`mock-…` fixture; `Flux.error(...)` for
 `trigger:error`/`trigger:rejected` (a transport failure, as a gRPC status would be);
 a single agent `error` event for `trigger:agent-error`; `Flux.just(done)` for empty;
 `Flux.never()` for timeout — the orchestrator's own timeout operator is what ends
@@ -378,7 +499,8 @@ echo-or-fabricate logic once the finalized contract confirmed neither exists.
 
 **`GrpcMlAgentClient`** — built from the shared `ManagedChannel`/`ChatAgentStub` (§7),
 calls the ML Agent's `AskPolicyManager` server-streaming RPC
-(`src/main/proto/{common,policy_manager,chat_agent}.proto`). grpc-java's generated
+(`src/main/proto/orchestrator/v1/{common,chat_agent}.proto`,
+`src/main/proto/policy_manager/v1/policy_manager.proto`). grpc-java's generated
 async stub is callback-based (`StreamObserver`), not `Flux`-based, so
 `grpcEventFlux` bridges the two manually via `Flux.create` plus grpc-java's own manual
 flow-control API (`ClientCallStreamObserver#disableAutoRequestWithInitial(0)`/
@@ -407,8 +529,8 @@ Never buffers the full response (no `collectList()`/`.block()` anywhere — prov
 the in-process gRPC tests, not just claimed), and emits each `AnswerEvent` it
 receives unchanged — the tests assert deep `equals` between what the in-process server
 sent and what the client emitted. The only per-event work is a WARN on a contract
-anomaly (a `payload` violating the citation invariant, §16, a `generated_policy` with
-an empty `policy_json`, or an unset-oneof event, which is also filtered out). Per-event INFO logging is in `ChatOrchestrationServiceImpl`,
+anomaly (a `payload` violating a contract rule, §16, or an unset-oneof event, which is
+also filtered out). Per-event INFO logging is in `ChatOrchestrationServiceImpl`,
 so the mock and real clients share it. The initial call's gRPC
 `Status.Code` is still translated into `MlAgentRejectedException`/
 `MlAgentCommunicationException`/`MlAgentUnavailableException`, since a status is not an
@@ -437,10 +559,12 @@ values come from typed, `@Validated`
 [`MlAgentProperties`](../src/main/java/com/pmbotservice/config/MlAgentProperties.java)
 — a missing/invalid mandatory value fails startup, not a request.
 
-**Build-time codegen**: `src/main/proto/{common,policy_manager,chat_agent}.proto` —
-the Policy Manager 3-file contract, kept flat under `src/main/proto/` (no
-subdirectory) consistent with this repo's existing convention, all three sharing one
-package (`pmbotservice.mlagent.v1` — part of the gRPC wire path — / Java `com.pmbotservice.mlagent.grpc.v1`) — is compiled
+**Build-time codegen**: `src/main/proto/orchestrator/v1/common.proto`,
+`src/main/proto/policy_manager/v1/policy_manager.proto` (Thoughtful Labs' files, verbatim)
+and `src/main/proto/orchestrator/v1/chat_agent.proto` (ours) — the Policy Manager 3-file
+contract, laid out in the same directories as TF Labs' copies so their
+`import "orchestrator/v1/common.proto"` resolves unchanged, all three sharing one
+package (`cmbotservice.mlagent.v1` — part of the gRPC wire path — / Java `com.cmbotservice.mlagent.grpc.v1`) — is compiled
 into `ChatAgentGrpc`/message classes by `protobuf-maven-plugin` (+ the `os-maven-plugin`
 build extension, which resolves the right `protoc`/`protoc-gen-grpc-java` native
 binary per OS — verified working on Windows) bound to `generate-sources`, so the
@@ -659,7 +783,8 @@ Filter by correlation ID to get one request's whole trail. Send
 `REDIS_SESSION_RECORD_FOUND`/`_PARSED`, `AUTH_SUCCEEDED` → `REQUEST_CONTEXT_RESOLVED` →
 `CHAT_REQUEST_RECEIVED` → `GRPC_CALL_STARTED` (target host:port) or
 `MOCK_ML_AGENT_CALL_STARTED` → `ML_REQUEST_STARTED` → `ML_STREAM_STARTED` →
-`ML_EVENT_TOOL_CALL`/`_TOOL_RESULT`/`_PAYLOAD`/`_GENERATED_POLICY`/`_DONE`/`_ERROR` →
+`ML_EVENT_TOOL_CALL`/`_TOOL_RESULT`/`_PAYLOAD` (payload type, status, citation
+count)/`_DONE`/`_ERROR` →
 `ML_STREAM_COMPLETED`
 (per-event-type counts; `chunk`/`ping` are counted rather than logged one by one) →
 `SSE_STREAM_COMPLETED` → `HTTP_REQUEST_COMPLETED` (status, duration).
@@ -667,8 +792,8 @@ Filter by correlation ID to get one request's whole trail. Send
 WARN/ERROR events: `AUTH_REJECTED`, `REDIS_SESSION_RECORD_NOT_FOUND`,
 `REDIS_SESSION_RECORD_INCOMPLETE`/`_UNPARSEABLE`, `REDIS_SESSION_LOOKUP_FAILED`
 (Redis endpoint, full cause chain, stack trace), `GRPC_CALL_FAILED` (gRPC status and
-description), `GRPC_EVENT_IGNORED`, `GRPC_PAYLOAD_CONTRACT_VIOLATION`,
-`GRPC_GENERATED_POLICY_CONTRACT_VIOLATION`,
+description), `GRPC_EVENT_IGNORED`, `GRPC_PAYLOAD_CONTRACT_VIOLATION` (no recognised
+payload arm set),
 `ML_REQUEST_RETRY`, `ML_REQUEST_TIMEOUT`, `CIRCUIT_BREAKER_OPEN`,
 `CONCURRENCY_LIMIT_REACHED`, `ML_AGENT_REJECTED`, `ML_REQUEST_FAILED`,
 `SSE_SERVICE_ERROR_SENT`, `REQUEST_VALIDATION_FAILED`, `REQUEST_REJECTED`. At startup:
@@ -723,7 +848,12 @@ server type; pure configuration, no custom lifecycle code.
 ## 15. Validation, Sizing, DTO Boundaries
 
 `ChatRequest` (frontend-facing): unknown fields are ignored, not rejected; `tenantId`/`organization` are validated separately, as headers, by
-`RequestContextResolver`; `@Size(max=200)` on the optional `operatorId`; `@NotBlank` +
+`RequestContextResolver`; the optional `policyContext` is `@Valid`-cascaded
+(`@Size(max=200)` on its ids, `max=100` on `policySetVersion`/`candidateVersion`,
+`max=8000` on `historicalSummary`, at most 100 non-blank `missedFraudIndicatorIds` of up to
+200 chars; values are otherwise passed through unchecked; blank strings normalized to `null`,
+an absent `missedFraudIndicatorIds` to an empty list); the optional
+`operatorId` is `@Size(max=200)`, blank normalized to `null`; `@NotBlank` +
 `@Size(max=4000)` hard
 ceiling on `message` plus a separately-configurable, runtime-checked
 `chat.max-message-length` ceiling (belt-and-suspenders: the annotation is the
@@ -753,11 +883,13 @@ propagate to the frontend by design (§5).
 This backend no longer judges the content of the agent's events; it forwards them.
 An unset (or unrecognised) `event` oneof arm is ignored per the contract ("clients
 MUST ignore events whose `event` oneof is unset or unrecognised and continue reading
-the stream" — logged at WARN as `GRPC_EVENT_IGNORED`, stream continues). The contract's `payload` invariant
-(every `key_signal` carries ≥1 citation) and a `payload` with no recognised arm are
-reported as WARN logs by `GrpcMlAgentClient` but the event is still forwarded as-is —
-rejecting the whole answer would be this backend overriding the agent's response, and
-the contract already requires clients to tolerate unresolvable citation ids. `MlAgentMalformedResponseException` now covers only an event that cannot be rendered
+the stream" — logged at WARN as `GRPC_EVENT_IGNORED`, stream continues). A `payload`
+with no recognised arm is reported as a `GRPC_PAYLOAD_CONTRACT_VIOLATION` WARN log by
+`GrpcMlAgentClient`. The PM contract's other rules (a set `status`, resolvable
+citations, metrics only on completed simulations, one `payload` before `done`) are
+not checked here at all — the agent owns them. Either way the events are forwarded
+as-is — rejecting the whole answer would be this backend overriding the
+agent's response. `MlAgentMalformedResponseException` now covers only an event that cannot be rendered
 as JSON at all.
 
 ## 17. Security Hardening (code-level; no gateway/infra here)
@@ -808,14 +940,18 @@ com.pmbotservice
  │               RedisConnectivityCheck
  ├─ web/
  │   ├─ controller/  ChatController, SessionDebugController (temporary, mode: BFF_SESSION)
- │   ├─ dto/         ChatRequest, ErrorResponse, SessionDebugResponse
+ │   ├─ dto/         ChatRequest, PolicyContext, HistoryTurn, ErrorResponse,
+ │   │               SessionDebugResponse
  │   └─ advice/      GlobalExceptionHandler
  ├─ service/    ChatOrchestrationService (interface), ChatOrchestrationServiceImpl,
  │               ChatMetrics
  ├─ mlagent/    MlAgentClient, MlAgentRequest, MockMlAgentClient, MockScenario,
- │               GrpcMlAgentClient, grpc.v1/ (generated: ChatAgentGrpc,
+ │               GrpcMlAgentClient
+ │               (generated, in com.cmbotservice.mlagent.grpc.v1: ChatAgentGrpc,
  │               AskPolicyManagerRequest, AnswerEvent, AnswerPayload,
- │               PolicyManagerAnswerPayload, GeneratedPolicy, AgentRequestContext,
+ │               PolicyManagerAnswerPayload, PolicyManagerContext,
+ │               PolicyRecommendation, PolicyDefinition, SimulationSummary,
+ │               PolicyImpact, PolicyMetrics, PolicyCitation, AgentRequestContext,
  │               ConversationTurn, Chunk, ToolCall, ToolResult, Done, Error, Ping)
  ├─ sse/        SseEvents (AnswerEvent → SSE, verbatim), SseEventType,
  │               ServiceErrorEvent
@@ -993,7 +1129,8 @@ contract's request field mapping over gRPC (`history` translated into the `user`
 `agent` oneof), every event type forwarded as the identical proto message and
 rendered as SSE with the agent's own event names and field names (`SseEventsTest`
 round-trips every one back through `JsonFormat.parser()`), the agent's `error` event
-and a citation-less `payload` forwarded untouched, an unset-`oneof` event ignored
+and a contract-violating `payload` forwarded untouched, an unset-`oneof` event (and a
+legacy `generated_policy` field-8 event) ignored
 per the finalized contract, gRPC `Status.Code` → exception → `service_error` mapping,
 and `history` forwarded untouched (defaulting to an empty list, never `null`,
 when omitted), and every authentication rejection path (§20) plus its success path

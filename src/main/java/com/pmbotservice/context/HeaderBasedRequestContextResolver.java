@@ -24,8 +24,6 @@ import org.springframework.web.server.ServerWebExchange;
 @Slf4j
 public class HeaderBasedRequestContextResolver implements RequestContextResolver {
 
-  private static final String UNKNOWN_USER = "unknown-user";
-
   @Override
   public RequestContext resolve(ServerWebExchange exchange) {
     String tenantId = RequestContextResolver.requireHeader(exchange, RequestHeaders.TENANT_ID);
@@ -38,18 +36,18 @@ public class HeaderBasedRequestContextResolver implements RequestContextResolver
           "REQUEST_CONTEXT_USER_DEFAULTED header={} missing — using '{}' as userId (logging"
               + " only, never forwarded to the ML Agent)",
           RequestHeaders.USER_ID,
-          UNKNOWN_USER);
+          RequestContext.UNKNOWN_USER);
     }
     log.info(
         "REQUEST_CONTEXT_RESOLVED source=headers (security mode NONE) tenantId={}"
             + " organization={} userId={}",
         tenantId,
         organization,
-        StringUtils.hasText(userId) ? userId : UNKNOWN_USER);
+        StringUtils.hasText(userId) ? userId : RequestContext.UNKNOWN_USER);
     return new RequestContext(
         tenantId,
         organization,
-        StringUtils.hasText(userId) ? userId : UNKNOWN_USER,
+        StringUtils.hasText(userId) ? userId : RequestContext.UNKNOWN_USER,
         correlationId,
         null);
   }

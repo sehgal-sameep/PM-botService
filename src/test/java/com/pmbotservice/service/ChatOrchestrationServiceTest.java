@@ -2,6 +2,15 @@ package com.pmbotservice.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.cmbotservice.mlagent.grpc.v1.AnswerEvent;
+import com.cmbotservice.mlagent.grpc.v1.AnswerPayload;
+import com.cmbotservice.mlagent.grpc.v1.Chunk;
+import com.cmbotservice.mlagent.grpc.v1.Done;
+import com.cmbotservice.mlagent.grpc.v1.Error;
+import com.cmbotservice.mlagent.grpc.v1.Ping;
+import com.cmbotservice.mlagent.grpc.v1.PolicyManagerAnswerPayload;
+import com.cmbotservice.mlagent.grpc.v1.ToolCall;
+import com.cmbotservice.mlagent.grpc.v1.ToolResult;
 import com.pmbotservice.common.ErrorCode;
 import com.pmbotservice.common.MlAgentCommunicationException;
 import com.pmbotservice.common.MlAgentRejectedException;
@@ -12,20 +21,11 @@ import com.pmbotservice.config.ResilienceProperties;
 import com.pmbotservice.context.RequestContext;
 import com.pmbotservice.mlagent.MlAgentClient;
 import com.pmbotservice.mlagent.MlAgentRequest;
-import com.pmbotservice.mlagent.grpc.v1.AnswerEvent;
-import com.pmbotservice.mlagent.grpc.v1.AnswerPayload;
-import com.pmbotservice.mlagent.grpc.v1.Chunk;
-import com.pmbotservice.mlagent.grpc.v1.Done;
-import com.pmbotservice.mlagent.grpc.v1.Error;
-import com.pmbotservice.mlagent.grpc.v1.GeneratedPolicy;
-import com.pmbotservice.mlagent.grpc.v1.Ping;
-import com.pmbotservice.mlagent.grpc.v1.PolicyManagerAnswerPayload;
-import com.pmbotservice.mlagent.grpc.v1.ToolCall;
-import com.pmbotservice.mlagent.grpc.v1.ToolResult;
 import com.pmbotservice.sse.ServiceErrorEvent;
 import com.pmbotservice.sse.SseEvents;
 import com.pmbotservice.web.dto.ChatRequest;
 import com.pmbotservice.web.dto.HistoryTurn;
+import com.pmbotservice.web.dto.PolicyContext;
 import io.github.resilience4j.bulkhead.Bulkhead;
 import io.github.resilience4j.bulkhead.BulkheadConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
@@ -91,7 +91,7 @@ class ChatOrchestrationServiceTest {
   }
 
   private static ChatRequest chatRequest(String message) {
-    return new ChatRequest(null, "req-1", null, message);
+    return new ChatRequest(null, "req-1", null, null, message);
   }
 
   private static ChatProperties defaultChatProperties() {
@@ -408,13 +408,9 @@ class ChatOrchestrationServiceTest {
                     AnswerPayload.newBuilder()
                         .setPolicyManagerAnswerPayload(
                             PolicyManagerAnswerPayload.newBuilder()
-                                .addKeySignals(
-                                    PolicyManagerAnswerPayload.KeySignal.newBuilder()
-                                        .setSignal("s")
-                                        .addCitations("c1"))))
-                .build(),
-            AnswerEvent.newBuilder()
-                .setGeneratedPolicy(GeneratedPolicy.newBuilder().setPolicyJson("{\"name\":\"p1\"}"))
+                                .setStatus(
+                                    PolicyManagerAnswerPayload.Status.STATUS_SIMULATION_PENDING)
+                                .addFollowUpQuestions("q")))
                 .build(),
             AnswerEvent.newBuilder()
                 .setDone(
@@ -448,15 +444,7 @@ class ChatOrchestrationServiceTest {
     }
     assertThat(events)
         .extracting(ServerSentEvent::event)
-        .containsExactly(
-            "tool_call",
-            "tool_result",
-            "chunk",
-            "ping",
-            "chunk",
-            "payload",
-            "generated_policy",
-            "done");
+        .containsExactly("tool_call", "tool_result", "chunk", "ping", "chunk", "payload", "done");
   }
 
   @Test
@@ -543,6 +531,7 @@ class ChatOrchestrationServiceTest {
             List.of(new HistoryTurn("user", "hi"), new HistoryTurn("assistant", "hello")),
             "req-1",
             null,
+            null,
             "hello");
 
     service.streamMessage(context(), request).collectList().block(Duration.ofSeconds(5));
@@ -554,51 +543,80 @@ class ChatOrchestrationServiceTest {
             new MlAgentRequest.HistoryTurn("assistant", "hello"));
   }
 
-  @Test
-  void operatorId_isForwardedFromTheRequestBody_neverFromContextUserId() {
+  private MlAgentRequest captureMlRequest(RequestContext context, ChatRequest request) {
     AtomicReference<MlAgentRequest> captured = new AtomicReference<>();
     MlAgentClient capturing =
-        request -> {
-          captured.set(request);
+        mlRequest -> {
+          captured.set(mlRequest);
           return Flux.just(DONE);
         };
     ChatOrchestrationService service =
         newService(
-            CircuitBreaker.ofDefaults("t-ids"),
-            Bulkhead.ofDefaults("t-ids"),
+            CircuitBreaker.ofDefaults("t-capture"),
+            Bulkhead.ofDefaults("t-capture"),
             5,
             defaultChatProperties(),
             capturing);
-    ChatRequest request = new ChatRequest(null, "req-1", "op-7", "hello");
-
-    service.streamMessage(context(), request).collectList().block(Duration.ofSeconds(5));
-
-    assertThat(captured.get().operatorId()).isEqualTo("op-7");
+    service.streamMessage(context, request).collectList().block(Duration.ofSeconds(5));
+    return captured.get();
   }
 
   @Test
-  void absentOperatorId_staysNull_evenWhenTheContextHasAUserId() {
-    AtomicReference<MlAgentRequest> captured = new AtomicReference<>();
-    MlAgentClient capturing =
-        request -> {
-          captured.set(request);
-          return Flux.just(DONE);
-        };
-    ChatOrchestrationService service =
-        newService(
-            CircuitBreaker.ofDefaults("t-no-ids"),
-            Bulkhead.ofDefaults("t-no-ids"),
-            5,
-            defaultChatProperties(),
-            capturing);
+  void operatorId_isForwardedFromTheRequestBody_neverFromContextUserId() {
+    // context() carries userId "analyst-1"; the body's operatorId is what reaches the agent.
+    MlAgentRequest sent =
+        captureMlRequest(context(), new ChatRequest(null, "req-1", "op-7", null, "hello"));
 
-    // context() carries userId "analyst-1" — it must not leak into operatorId.
-    service
-        .streamMessage(context(), chatRequest("hello"))
-        .collectList()
-        .block(Duration.ofSeconds(5));
+    assertThat(sent.operatorId()).isEqualTo("op-7");
+  }
 
-    assertThat(captured.get().operatorId()).isNull();
+  @Test
+  void absentOperatorId_staysNull_neverDefaultedFromTheContext() {
+    MlAgentRequest sent = captureMlRequest(context(), chatRequest("hello"));
+
+    assertThat(sent.operatorId()).isNull();
+  }
+
+  @Test
+  void policyContext_isForwardedFieldForField() {
+    ChatRequest request =
+        new ChatRequest(
+            null,
+            "req-1",
+            null,
+            new PolicyContext(
+                "baseline-01",
+                "7",
+                "scenario-01",
+                "case-9",
+                "candidate-01",
+                "3",
+                "sim-01",
+                List.of("indicator-01"),
+                "summary"),
+            "hello");
+
+    MlAgentRequest sent = captureMlRequest(context(), request);
+
+    assertThat(sent.policyContext())
+        .isEqualTo(
+            new MlAgentRequest.PolicyContext(
+                "baseline-01",
+                "7",
+                "scenario-01",
+                "case-9",
+                "candidate-01",
+                "3",
+                "sim-01",
+                List.of("indicator-01"),
+                "summary"));
+  }
+
+  @Test
+  void absentPolicyContext_staysNull() {
+    MlAgentRequest sent = captureMlRequest(context(), chatRequest("hello"));
+
+    assertThat(sent.policyContext()).isNull();
   }
 
   @Test

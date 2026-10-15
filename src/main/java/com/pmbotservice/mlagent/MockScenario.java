@@ -10,6 +10,7 @@ import java.util.Locale;
  * reproducible from Swagger or curl.
  */
 public enum MockScenario {
+  /** Payload status {@code STATUS_CANDIDATE_READY} — the default. */
   SUCCESS(null),
   SLOW("trigger:slow"),
   TIMEOUT("trigger:timeout"),
@@ -17,8 +18,18 @@ public enum MockScenario {
   /** The agent's own in-stream {@code error} event (model-level), as opposed to {@link #ERROR}. */
   AGENT_ERROR("trigger:agent-error"),
   EMPTY("trigger:empty"),
-  /** A {@code generated_policy} event, as when the user asks the agent to create a policy. */
-  GENERATE_POLICY("trigger:generate-policy"),
+  /** Payload status {@code STATUS_NEEDS_INPUT}, with follow-up questions. */
+  NEEDS_INPUT("trigger:needs-input"),
+  /** Payload status {@code STATUS_INSUFFICIENT_DATA}, with no recommendation. */
+  INSUFFICIENT_DATA("trigger:insufficient-data"),
+  /** Payload status {@code STATUS_SIMULATION_PENDING}: a candidate plus a running simulation. */
+  SIMULATION_PENDING("trigger:simulation-pending"),
+  /**
+   * Payload status {@code STATUS_EVALUATED}: a candidate plus completed baseline/candidate metrics.
+   */
+  EVALUATED("trigger:evaluated"),
+  /** Payload status {@code STATUS_SIMULATION_FAILED}: a candidate plus a failed simulation. */
+  SIMULATION_FAILED("trigger:simulation-failed"),
   REJECTED("trigger:rejected");
 
   private final String keyword;

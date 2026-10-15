@@ -6,14 +6,16 @@ ML/AI Agent. Production-hardened for high traffic and a large number of concurre
 long-lived SSE connections: circuit breaker, bulkhead, bounded retry, declarative
 timeouts, true reactive backpressure, structured logging, metrics, and tracing.
 
-> **ML Agent contract.** The gRPC contract in `src/main/proto` is the Policy Manager
-> one: the `ChatAgent.AskPolicyManager(AskPolicyManagerRequest) returns (stream
-> AnswerEvent)` RPC (`common.proto`, `policy_manager.proto`, `chat_agent.proto`). A
-> Policy Manager conversation is plain question/answer, and the stream includes a
-> `generated_policy` event when the user asks for a new policy (see the SSE event
-> contract below). The proto package is `pmbotservice.mlagent.v1`; it is part of the
-> gRPC wire path (`/pmbotservice.mlagent.v1.ChatAgent/AskPolicyManager`), so it must
-> match the ML Agent's.
+> **ML Agent contract.** The gRPC contract in `src/main/proto` is Thoughtful Labs'
+> finalized Policy Manager contract: the `ChatAgent.AskPolicyManager(AskPolicyManagerRequest)
+> returns (stream AnswerEvent)` RPC. `orchestrator/v1/common.proto` and
+> `policy_manager/v1/policy_manager.proto` are TF Labs' files copied verbatim from `docs/`
+> (a test fails the build if they drift); `orchestrator/v1/chat_agent.proto` adds the rpc
+> and the `policy_manager_answer_payload` arm. The agent recommends and backtests fraud
+> policies: the request carries a `policy_context`, and each successful turn streams text
+> plus one structured `payload` with a `status`. The proto package is
+> `cmbotservice.mlagent.v1`; it is part of the gRPC wire path
+> (`/cmbotservice.mlagent.v1.ChatAgent/AskPolicyManager`), so it must match the ML Agent's.
 
 ```text
 The Java backend does not own conversation memory.
@@ -28,7 +30,7 @@ This service **does not** implement any ML/LLM logic — see
 [`GrpcMlAgentClient`](src/main/java/com/pmbotservice/mlagent/GrpcMlAgentClient.java)
 (real gRPC-based implementation, selected via config) for the abstraction the real ML
 team's API plugs into. Service-to-service communication with the ML Agent is gRPC
-(see `src/main/proto/{common,policy_manager,chat_agent}.proto`) — the frontend-facing
+(see `src/main/proto/`) — the frontend-facing
 contract above it stays plain HTTP + SSE either way, since the two are entirely
 decoupled by this interface.
 
@@ -158,15 +160,18 @@ curl -N -X POST "http://localhost:8080/back-office-ai-pm/api/v1/chat/messages" \
   -H "X-User-Id: analyst-1" \
   -H "X-Tenant-Id: tenant-42" \
   -H "X-Org-Id: org-7" \
-  -d '{"message":"Which policies are currently active?"}'
+  -d '{"operatorId":"analyst-1","message":"Recommend a policy for missed fraud and compare it with our current policies.","policyContext":{"policySetId":"baseline-01","policySetVersion":"7","scenarioId":"scenario-01","missedFraudIndicatorIds":["indicator-01"],"historicalSummary":"Card-not-present fraud on new devices rose 18% over the last 30 days."}}'
 ```
+
+Every `policyContext` field is optional and forwarded as-is to `PolicyManagerContext`:
+`policySetId`, `policySetVersion`, `scenarioId`, `caseId`, `candidateId`,
+`candidateVersion` (a string), `simulationId`, `missedFraudIndicatorIds` (array of
+strings) and `historicalSummary`.
 
 The response is the ML Agent's own event stream, untranslated — see the SSE event
 contract below. `done` carries no identifier to capture; its `stop_reason` tells you
-whether the agent cut generation short (`STOP_REASON_TRUNCATED`). Asking the agent to
-generate a new policy (e.g. `"Generate a policy that flags high-value transfers to new
-beneficiaries"`) additionally yields a `generated_policy` event carrying the policy
-JSON.
+whether the agent cut generation short (`STOP_REASON_TRUNCATED`). The structured result
+(status, recommendation, simulation, citations) arrives in the single `payload` event.
 
 ### 2. Continue the conversation
 
@@ -177,18 +182,15 @@ curl -N -X POST "http://localhost:8080/back-office-ai-pm/api/v1/chat/messages" \
   -H "Content-Type: application/json" \
   -H "X-Tenant-Id: tenant-42" \
   -H "X-Org-Id: org-7" \
-  -d '{"history":[{"role":"user","content":"Which policies are currently active?"},{"role":"assistant","content":"..."}],"message":"Which rules make up the velocity policy?"}'
+  -d '{"history":[{"role":"user","content":"Recommend a policy for missed fraud and compare it with our current policies."},{"role":"assistant","content":"..."}],"policyContext":{"policySetId":"baseline-01","scenarioId":"scenario-01","candidateId":"candidate-01","candidateVersion":"1"},"message":"Backtest it against the baseline."}'
 ```
-
-Free text works the same way, e.g. `"Which policy covers geolocation mismatches?"`,
-`"Create a policy for repeated failed logins"`.
 
 ### 3. Exercise the mock ML Agent's failure modes
 
 The mock recognizes these keywords anywhere in `message`:
 
 ```bash
-curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"message":"trigger:generate-policy"}'      # `generated_policy` event (also: any "generate"/"create" + "policy" message)
+curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"message":"trigger:evaluated"}'   # payload STATUS_EVALUATED (also: trigger:needs-input, trigger:insufficient-data, trigger:simulation-pending, trigger:simulation-failed; default STATUS_CANDIDATE_READY)
 curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"message":"trigger:slow"}'
 curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"message":"trigger:timeout"}'   # first-response timeout, then a `service_error` event
 curl -N -X POST ".../chat/messages" -H "Content-Type: application/json" -H "X-Tenant-Id: t" -H "X-Org-Id: o" -d '{"message":"trigger:error"}'     # transport failure: retried, then `service_error` ML_AGENT_ERROR
@@ -307,10 +309,10 @@ SESSION_INVALID_OR_EXPIRED` if not, `503 SESSION_STORE_UNAVAILABLE` if Redis is 
 
 **The ML Agent's response is streamed to the frontend as-is.** This backend doesn't
 rename events or fields, reshape payloads, or add a wrapper. Each Thoughtful Labs
-`AnswerEvent` (`src/main/proto/chat_agent.proto`) becomes one SSE event:
+`AnswerEvent` (`src/main/proto/orchestrator/v1/chat_agent.proto`) becomes one SSE event:
 
 - `event:` is the name of the `AnswerEvent` oneof field that is set: `chunk`,
-  `tool_call`, `tool_result`, `payload`, `generated_policy`, `done`, `error`, `ping`. It's read from the
+  `tool_call`, `tool_result`, `payload`, `done`, `error`, `ping`. It's read from the
   protobuf descriptor, not hard-coded, so a new arm added to the contract flows
   through under its own name.
 - `data:` is the whole `AnswerEvent` in the canonical proto3 JSON mapping
@@ -321,16 +323,16 @@ rename events or fields, reshape payloads, or add a wrapper. Each Thoughtful Lab
 
 ```
 event:tool_call
-data:{"tool_call":{"tool_call_id":"t-1","name":"searchPolicies","args_json":"{\"status\":\"ACTIVE\"}"}}
+data:{"tool_call":{"tool_call_id":"t-1","name":"AgenticGetPolicyContext","args_json":"{\"policySetId\":\"baseline-01\",\"scenarioId\":\"scenario-01\"}"}}
 
 event:tool_result
 data:{"tool_result":{"tool_call_id":"t-1","status":"STATUS_OK","ms":"42","row_count":"3"}}
 
 event:chunk
-data:{"chunk":{"delta":"The active policy set contains..."}}
+data:{"chunk":{"delta":"The proposed refinement is ready for simulation."}}
 
 event:payload
-data:{"payload":{"policy_manager_answer_payload":{"key_signals":[{"signal":"...","citations":["pol-2"]}],"citations":[{"id":"pol-2","source":"searchPolicies","fields":["policies[1].rules"]}]}}}
+data:{"payload":{"policy_manager_answer_payload":{"status":"STATUS_CANDIDATE_READY","recommendation":{"candidate_id":"candidate-01","candidate_version":"1","change_type":"CHANGE_TYPE_REFINE","target_policy_ids":["policy-17"],"title":"...","description":"...","rationale":"...","policy_definition":{"format":"candidate-rule-format","schema_version":"1.0","definition":"{\"position\":5,\"details\":{...},\"conditions\":{...},\"actions\":{...}}"},"citation_ids":["evidence-01"],"assumptions":[],"confidence":0.72},"citations":[{"citation_id":"evidence-01","source_tool":"AgenticGetPolicyContext","source_record_id":"segment-01","snapshot_id":"discovery-01","field_paths":["missedFraudCount"]}],"follow_up_questions":[],"limitations":[]}}}
 
 event:done
 data:{"done":{"stop_reason":"STOP_REASON_COMPLETED","latency_ms":"1800","tokens_in":"12","tokens_out":"140"}}
@@ -342,22 +344,9 @@ which is never converted into a backend error. The only agent event not forwarde
 one with its `event` oneof unset: the contract says to ignore it, and it carries
 nothing recognisable.
 
-`generated_policy` (`AnswerEvent` field 8, `GeneratedPolicy { string policy_json = 1; }`)
-is sent when the user asks the agent to generate a new policy:
-
-```
-event:generated_policy
-data:{"generated_policy":{"policy_json":"{\"name\":\"New beneficiary high-value transfer\",\"enabled\":false,...}"}}
-```
-
-`policy_json` is the policy as a JSON **string**, forwarded untouched — the frontend must
-`JSON.parse` it. It is not terminal: chunks may come before and/or after it, and the
-stream still ends with `done` (keep the policy) or `error` (discard it with the rest of
-the turn).
-
 | Event | Source | Payload |
 |---|---|---|
-| `chunk`, `tool_call`, `tool_result`, `payload`, `generated_policy`, `done`, `error`, `ping` | ML Agent, verbatim | the `AnswerEvent` as proto3 JSON (see above) |
+| `chunk`, `tool_call`, `tool_result`, `payload`, `done`, `error`, `ping` | ML Agent, verbatim | the `AnswerEvent` as proto3 JSON (see above) |
 | `service_error` | this backend | `{ messageId, errorCode, errorMessage, timestamp }`, terminal. Only for failures that produced no agent event: unreachable/timed-out/gRPC-rejected agent, circuit breaker, bulkhead, message-length check |
 
 Every stream ends with exactly one of `done`, `error`, or `service_error`. The full
@@ -537,8 +526,7 @@ that file for the defaults).
 - `MockMlAgentClientTest` — reactive scenario behavior via `StepVerifier` (incl.
   `withVirtualTime` for delay-shaped scenarios — no `Thread.sleep`): the success path
   emits the real contract's `AnswerEvent`s (`tool_call`/`tool_result` trace, `chunk`s,
-  `payload`, `done`), `trigger:generate-policy` (or a "generate/create … policy"
-  message) emits `generated_policy` instead of `payload`, `trigger:agent-error` emits
+  `payload`, `done`), each payload-status trigger emits that `status`, `trigger:agent-error` emits
   the agent's own `error` event, and
   `trigger:error`/`trigger:rejected` fail the `Flux` like a gRPC status would.
 - `ChatOrchestrationServiceTest` — every agent event forwarded in order with identical
@@ -606,7 +594,7 @@ required — this is the payoff of `MlAgentClient` being a real seam: the transp
 underneath it (HTTP+SSE, then gRPC) has changed twice now, and the gRPC contract
 itself has changed too (`Chat`/`ChatRequest`/`ChatEvent` → `AskPolicyManager`/
 `AskPolicyManagerRequest`/`AnswerEvent`). `GrpcMlAgentClient` speaks the ML Agent's
-`ChatAgent.AskPolicyManager` RPC (`src/main/proto/{common,policy_manager,chat_agent}.proto`)
+`ChatAgent.AskPolicyManager` RPC (`src/main/proto/`)
 — see the SSE event contract above and
 `docs/ARCHITECTURE.md §2` for the full request/response shape. Because the response is
 forwarded verbatim, a change to the ML Agent's response messages reaches the frontend

@@ -1,0 +1,242 @@
+syntax = "proto3";
+
+package cmbotservice.mlagent.v1;
+
+import "orchestrator/v1/common.proto";
+
+option java_package = "com.cmbotservice.mlagent.grpc.v1";
+option java_multiple_files = true;
+
+// Policy Manager-specific request and payload types.
+
+message AskPolicyManagerRequest {
+  AgentRequestContext request_context = 1;
+
+  // Authenticated operator making the request. Populated by the backend.
+  string operator_id = 2;
+
+  // User prompt to be processed by the agent.
+  string prompt = 3;
+
+  // Policy set, scenario and optional objects the question is about.
+  PolicyManagerContext policy_context = 4;
+
+  // Existing conversation transcript, when supplied by the caller.
+  repeated ConversationTurn history = 5;
+}
+
+// Identifies what the agent is analysing. Identifiers are opaque to the agent.
+message PolicyManagerContext {
+  // Baseline policy set.
+  string policy_set_id = 1;
+
+  // Exact version of the baseline policy set.
+  string policy_set_version = 2;
+
+  // Historical scenario selected for analysis and backtesting.
+  string scenario_id = 3;
+
+  // Case that prompted the investigation.
+  optional string case_id = 4;
+
+  // Existing recommendation being discussed.
+  optional string candidate_id = 5;
+
+  // Version of the recommendation being refined.
+  optional string candidate_version = 6;
+
+  // Simulation run whose results are being discussed.
+  optional string simulation_id = 7;
+
+  // Missed-fraud indicators the analysis starts from (PRD 8.3 LLM input).
+  repeated string missed_fraud_indicator_ids = 8;
+
+  // Summary of the relevant history, supplied by the backend (PRD 8.3).
+  optional string historical_summary = 9;
+}
+
+// Structured response needing rendered UI components produced by the agent.
+// Exactly one is emitted per successful turn, before `Done`. `Done` means the
+// chat turn finished; a simulation referenced here may still be pending.
+message PolicyManagerAnswerPayload {
+  // Outcome of the turn. Clients MUST treat any unrecognised value as
+  // STATUS_UNSPECIFIED.
+  enum Status {
+    // Unspecified status.
+    STATUS_UNSPECIFIED       = 0;
+    // The agent needs more information from the user; see follow_up_questions.
+    STATUS_NEEDS_INPUT       = 1;
+    // A candidate recommendation is ready; see recommendation.
+    STATUS_CANDIDATE_READY   = 2;
+    // A simulation was requested and has not finished.
+    STATUS_SIMULATION_PENDING = 3;
+    // A simulation completed and its results were evaluated.
+    STATUS_EVALUATED         = 4;
+    // The available data cannot support an answer; see limitations.
+    STATUS_INSUFFICIENT_DATA = 5;
+    // The simulation failed; see simulation.
+    STATUS_SIMULATION_FAILED = 6;
+  }
+
+  Status status = 1;
+
+  // Set when the turn produced or discussed a recommendation.
+  optional PolicyRecommendation recommendation = 2;
+
+  // Set when the turn references a simulation run.
+  optional SimulationSummary simulation = 3;
+
+  // References supporting the response. Clients MUST tolerate citation ids
+  // that do not resolve to an entry here.
+  repeated PolicyCitation citations = 4;
+
+  // Questions the agent needs answered to proceed.
+  repeated string follow_up_questions = 5;
+
+  // Caveats on the answer, e.g. data gaps or scenario coverage.
+  repeated string limitations = 6;
+}
+
+message PolicyRecommendation {
+  enum ChangeType {
+    // Unspecified change type.
+    CHANGE_TYPE_UNSPECIFIED      = 0;
+    // A new policy.
+    CHANGE_TYPE_NEW              = 1;
+    // Refinement of an existing policy.
+    CHANGE_TYPE_REFINE           = 2;
+    // Threshold update of an existing policy.
+    CHANGE_TYPE_THRESHOLD_UPDATE = 3;
+    // Merge of several policies.
+    CHANGE_TYPE_MERGE            = 4;
+    // Retirement of an existing policy.
+    CHANGE_TYPE_RETIRE           = 5;
+    // No change is recommended.
+    CHANGE_TYPE_NO_CHANGE        = 6;
+  }
+
+  string candidate_id = 1;
+
+  string candidate_version = 2;
+
+  ChangeType change_type = 3;
+
+  // Existing policies affected by the change.
+  repeated string target_policy_ids = 4;
+
+  string title = 5;
+
+  string description = 6;
+
+  string rationale = 7;
+
+  // Not required for NO_CHANGE or when the agent is asking for more input.
+  optional PolicyDefinition policy_definition = 8;
+
+  // Ids of the PolicyCitation entries supporting the recommendation.
+  repeated string citation_ids = 9;
+
+  // Assumptions the recommendation rests on.
+  repeated string assumptions = 10;
+
+  // Model confidence in [0, 1]; absent when the model reports none.
+  optional double confidence = 11;
+}
+
+// Executable policy, in the format the simulator accepts.
+message PolicyDefinition {
+  // Policy representation agreed with the simulator.
+  string format = 1;
+
+  string schema_version = 2;
+
+  // Policy definition serialized in `format`.
+  string definition = 3;
+}
+
+message SimulationSummary {
+  // Clients MUST treat any unrecognised value as STATUS_UNSPECIFIED.
+  enum Status {
+    // Unspecified status.
+    STATUS_UNSPECIFIED = 0;
+    // Accepted and waiting to run.
+    STATUS_QUEUED      = 1;
+    // Running.
+    STATUS_RUNNING     = 2;
+    // Finished; metrics are populated.
+    STATUS_COMPLETED   = 3;
+    // Failed; no metrics.
+    STATUS_FAILED      = 4;
+    // Cancelled; no metrics.
+    STATUS_CANCELLED   = 5;
+  }
+
+  string simulation_id = 1;
+
+  Status status = 2;
+
+  // Candidate evaluated by the simulation.
+  string candidate_id = 3;
+
+  string candidate_version = 4;
+
+  // Baseline the candidate was compared against.
+  string baseline_policy_set_id = 5;
+
+  string baseline_policy_set_version = 6;
+
+  // Historical data the simulation evaluated.
+  string snapshot_id = 7;
+
+  // Populated only when status == STATUS_COMPLETED. Reported by the
+  // simulator and matching the candidate version and snapshot above.
+  optional PolicyMetrics baseline_metrics = 8;
+
+  optional PolicyMetrics candidate_metrics = 9;
+
+  repeated string limitations = 10;
+
+  // Baseline-vs-candidate deltas. Populated only when status == STATUS_COMPLETED.
+  optional PolicyImpact impact = 11;
+}
+
+// Candidate minus baseline, as computed by the simulator (PRD PM-09, BT-06).
+message PolicyImpact {
+  // Change in fraud capture (recall); positive means more fraud caught.
+  optional double fraud_capture_uplift = 1;
+
+  // Change in false positives; positive means more legitimate users hit.
+  int64 false_positive_delta = 2;
+
+  // Net impact. Unit and definition to be agreed with the simulator owner.
+  optional double net_impact = 3;
+}
+
+message PolicyMetrics {
+  int64 true_positives = 1;
+  int64 false_positives = 2;
+  int64 true_negatives = 3;
+  int64 false_negatives = 4;
+
+  // Each ratio is absent when undefined (zero denominator).
+  optional double precision = 5;
+  optional double recall = 6;
+  optional double false_positive_rate = 7;
+}
+
+message PolicyCitation {
+  // Referenced from PolicyRecommendation.citation_ids.
+  string citation_id = 1;
+
+  // Tool the evidence came from.
+  string source_tool = 2;
+
+  // Referenced policy, event, aggregate or simulation record.
+  string source_record_id = 3;
+
+  // Historical snapshot the evidence belongs to, where applicable.
+  optional string snapshot_id = 4;
+
+  // Field paths within the source record.
+  repeated string field_paths = 5;
+}

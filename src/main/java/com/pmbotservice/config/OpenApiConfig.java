@@ -1,7 +1,10 @@
 package com.pmbotservice.config;
 
 import com.pmbotservice.context.RequestHeaders;
+import com.pmbotservice.mlagent.rule.CandidateRule;
 import com.pmbotservice.web.controller.SessionDebugController;
+import io.swagger.v3.core.converter.ModelConverters;
+import io.swagger.v3.oas.models.Components;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.info.Contact;
@@ -9,6 +12,7 @@ import io.swagger.v3.oas.models.info.Info;
 import io.swagger.v3.oas.models.parameters.Parameter;
 import io.swagger.v3.oas.models.servers.Server;
 import java.util.List;
+import org.springdoc.core.customizers.OpenApiCustomizer;
 import org.springdoc.core.customizers.OperationCustomizer;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
@@ -56,6 +60,24 @@ public class OpenApiConfig {
                         + "currently a configurable mock — see the 'Chat' endpoint description for the "
                         + "scenario-simulation keywords.")
                 .contact(new Contact().name("Policy Manager Platform Team")));
+  }
+
+  /**
+   * Adds the {@link CandidateRule} schema: it is not a request/response body of its own, so
+   * springdoc would not pick it up, but the frontend parses it out of {@code
+   * policy_definition.definition}. A customizer rather than {@code OpenAPI#components}, which
+   * springdoc replaces with the components it computes.
+   */
+  @Bean
+  public OpenApiCustomizer candidateRuleSchemaCustomizer() {
+    return openApi -> {
+      if (openApi.getComponents() == null) {
+        openApi.setComponents(new Components());
+      }
+      ModelConverters.getInstance()
+          .readAll(CandidateRule.class)
+          .forEach(openApi.getComponents()::addSchemas);
+    };
   }
 
   @Bean

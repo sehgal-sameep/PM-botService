@@ -20,6 +20,9 @@ package com.pmbotservice.context;
 public record RequestContext(
     String tenantId, String organization, String userId, String correlationId, String accessToken) {
 
+  /** Placeholder {@code userId} when the caller's identity is unknown; logging only. */
+  public static final String UNKNOWN_USER = "unknown-user";
+
   @Override
   public String toString() {
     return "RequestContext[tenantId=%s, organization=%s, userId=%s, correlationId=%s,"

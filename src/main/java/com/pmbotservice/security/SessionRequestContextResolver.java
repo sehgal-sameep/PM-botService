@@ -24,8 +24,6 @@ import org.springframework.web.server.ServerWebExchange;
 @Slf4j
 public class SessionRequestContextResolver implements RequestContextResolver {
 
-  private static final String UNKNOWN_USER = "unknown-user";
-
   @Override
   public RequestContext resolve(ServerWebExchange exchange) {
     SessionContext session = exchange.getAttribute(SessionContext.EXCHANGE_ATTRIBUTE);
@@ -34,7 +32,7 @@ public class SessionRequestContextResolver implements RequestContextResolver {
     // let a request through without one (see SessionAuthenticationWebFilter) —
     // every other path through the filter either populates it or rejects the
     // request outright before this resolver ever runs.
-    String userId = session != null ? session.username() : UNKNOWN_USER;
+    String userId = session != null ? session.username() : RequestContext.UNKNOWN_USER;
     String accessToken = session != null ? session.accessToken() : null;
     String tenantId = RequestContextResolver.requireHeader(exchange, RequestHeaders.TENANT_ID);
     String organization =
@@ -43,7 +41,7 @@ public class SessionRequestContextResolver implements RequestContextResolver {
       log.warn(
           "REQUEST_CONTEXT_WITHOUT_SESSION — no authenticated session on this request (only"
               + " possible with fail-open-on-redis-error); userId='{}', no access token",
-          UNKNOWN_USER);
+          RequestContext.UNKNOWN_USER);
     }
     log.info(
         "REQUEST_CONTEXT_RESOLVED source=bff-session tenantId={} organization={}"

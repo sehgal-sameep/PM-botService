@@ -1,6 +1,6 @@
 package com.pmbotservice.mlagent;
 
-import com.pmbotservice.mlagent.grpc.v1.AnswerEvent;
+import com.cmbotservice.mlagent.grpc.v1.AnswerEvent;
 import reactor.core.publisher.Flux;
 
 /**

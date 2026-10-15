@@ -1,6 +1,6 @@
 package com.pmbotservice.config;
 
-import com.pmbotservice.mlagent.grpc.v1.ChatAgentGrpc;
+import com.cmbotservice.mlagent.grpc.v1.ChatAgentGrpc;
 import io.grpc.ManagedChannel;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import jakarta.annotation.PreDestroy;

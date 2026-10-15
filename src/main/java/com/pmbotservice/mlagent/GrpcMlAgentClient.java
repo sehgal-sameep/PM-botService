@@ -1,5 +1,13 @@
 package com.pmbotservice.mlagent;
 
+import com.cmbotservice.mlagent.grpc.v1.AgentRequestContext;
+import com.cmbotservice.mlagent.grpc.v1.AnswerEvent;
+import com.cmbotservice.mlagent.grpc.v1.AnswerPayload;
+import com.cmbotservice.mlagent.grpc.v1.AskPolicyManagerRequest;
+import com.cmbotservice.mlagent.grpc.v1.ChatAgentGrpc;
+import com.cmbotservice.mlagent.grpc.v1.ConversationTurn;
+import com.cmbotservice.mlagent.grpc.v1.PolicyDefinition;
+import com.cmbotservice.mlagent.grpc.v1.PolicyManagerContext;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.util.JsonFormat;
 import com.pmbotservice.common.ErrorCode;
@@ -7,13 +15,7 @@ import com.pmbotservice.common.LogSanitizer;
 import com.pmbotservice.common.MlAgentCommunicationException;
 import com.pmbotservice.common.MlAgentRejectedException;
 import com.pmbotservice.common.MlAgentUnavailableException;
-import com.pmbotservice.mlagent.grpc.v1.AgentRequestContext;
-import com.pmbotservice.mlagent.grpc.v1.AnswerEvent;
-import com.pmbotservice.mlagent.grpc.v1.AnswerPayload;
-import com.pmbotservice.mlagent.grpc.v1.AskPolicyManagerRequest;
-import com.pmbotservice.mlagent.grpc.v1.ChatAgentGrpc;
-import com.pmbotservice.mlagent.grpc.v1.ConversationTurn;
-import com.pmbotservice.mlagent.grpc.v1.PolicyManagerAnswerPayload;
+import com.pmbotservice.mlagent.rule.CandidateRules;
 import io.grpc.Status;
 import io.grpc.stub.ClientCallStreamObserver;
 import io.grpc.stub.ClientResponseObserver;
@@ -27,17 +29,22 @@ import reactor.core.publisher.FluxSink;
 /**
  * Real {@link MlAgentClient} implementation: calls Thoughtful Labs' ML Agent over gRPC's
  * server-streaming {@code ChatAgent.AskPolicyManager} RPC (see {@code
- * src/main/proto/chat_agent.proto}) and relays its {@link AnswerEvent}s exactly as received — every
- * event type (<code>chunk</code>, <code>tool_call</code>, <code>tool_result</code>, <code>payload
- * </code>, <code>done</code>, <code>error</code>, <code>ping</code>, <code>generated_policy</code>)
- * and every field, with no translation into a backend-owned model. Never buffers the response — no
- * {@code collectList()}/{@code .block()}, just a straight {@code Flux}.
+ * src/main/proto/orchestrator/v1/chat_agent.proto}) and relays its {@link AnswerEvent}s exactly as
+ * received — every event type (<code>chunk</code>, <code>tool_call</code>, <code>tool_result</code>
+ * , <code>payload
+ * </code>, <code>done</code>, <code>error</code>, <code>ping</code>) and every field, with no
+ * translation into a backend-owned model. Never buffers the response — no {@code
+ * collectList()}/{@code .block()}, just a straight {@code Flux}.
  *
  * <p>The only event ever withheld is one whose {@code event} oneof is unset — an arm this build's
  * generated code doesn't know yet, or an empty message. Per the contract, "Clients MUST ignore
  * events whose `event` oneof is unset or unrecognised and continue reading the stream", and there
  * is nothing recognisable left in it to forward. Everything else is only <i>observed</i> here
  * (debug/warn logging), never altered.
+ *
+ * <p>One such observation: a recommendation's {@code policy_definition.definition} is expected to
+ * hold a rule in the candidate rule format ({@code CandidateRule}); one that does not parse as such
+ * is logged ({@code GRPC_PAYLOAD_RULE_UNPARSEABLE}) and still forwarded untouched.
  *
  * <p>grpc-java's generated async stub is callback-based ({@code StreamObserver}), not {@code
  * Flux}-based — {@link #grpcEventFlux} bridges the two manually via {@code Flux.create} plus
@@ -84,11 +91,13 @@ public class GrpcMlAgentClient implements MlAgentClient {
               boolean accessTokenPresent = hasText(request.accessToken());
               log.info(
                   "GRPC_CALL_STARTED messageId={} rpc=ChatAgent/AskPolicyManager target={}"
-                      + " historyTurns={} promptLength={} accessTokenPresent={}",
+                      + " historyTurns={} promptLength={} policyContextPresent={}"
+                      + " accessTokenPresent={}",
                   request.messageId(),
                   chatAgentStub.getChannel().authority(),
                   protoRequest.getHistoryCount(),
                   protoRequest.getPrompt().length(),
+                  protoRequest.hasPolicyContext(),
                   accessTokenPresent);
               log.info(
                   "GRPC_CALL_REQUEST messageId={} authorization={} request={}",
@@ -193,12 +202,6 @@ public class GrpcMlAgentClient implements MlAgentClient {
     if (event.getEventCase() == AnswerEvent.EventCase.PAYLOAD) {
       warnOnPayloadContractViolations(event.getPayload());
     }
-    if (event.getEventCase() == AnswerEvent.EventCase.GENERATED_POLICY
-        && event.getGeneratedPolicy().getPolicyJson().isBlank()) {
-      log.warn(
-          "GRPC_GENERATED_POLICY_CONTRACT_VIOLATION reason=generated_policy with empty policy_json"
-              + " — forwarding as-is");
-    }
     return true;
   }
 
@@ -209,12 +212,18 @@ public class GrpcMlAgentClient implements MlAgentClient {
               + " as-is");
       return;
     }
-    for (PolicyManagerAnswerPayload.KeySignal signal :
-        payload.getPolicyManagerAnswerPayload().getKeySignalsList()) {
-      if (signal.getCitationsCount() == 0) {
+    PolicyDefinition definition =
+        payload.getPolicyManagerAnswerPayload().getRecommendation().getPolicyDefinition();
+    if (!definition.getDefinition().isBlank()) {
+      try {
+        CandidateRules.fromJson(definition.getDefinition());
+      } catch (IllegalArgumentException ex) {
         log.warn(
-            "GRPC_PAYLOAD_CONTRACT_VIOLATION reason=key signal without a citation — forwarding"
-                + " as-is");
+            "GRPC_PAYLOAD_RULE_UNPARSEABLE format={} schemaVersion={} reason={} — forwarding"
+                + " as-is",
+            definition.getFormat(),
+            definition.getSchemaVersion(),
+            ex.getMessage());
       }
     }
   }
@@ -291,6 +300,47 @@ public class GrpcMlAgentClient implements MlAgentClient {
 
     if (request.history() != null) {
       request.history().forEach(turn -> builder.addHistory(toConversationTurn(turn)));
+    }
+    if (request.policyContext() != null) {
+      builder.setPolicyContext(toPolicyManagerContext(request.policyContext()));
+    }
+    return builder.build();
+  }
+
+  /**
+   * {@code null} fields are simply not set: the contract's {@code optional} fields ({@code
+   * case_id}, {@code candidate_id}, {@code candidate_version}, {@code simulation_id}, {@code
+   * historical_summary}) stay absent rather than present-but-empty.
+   */
+  private static PolicyManagerContext toPolicyManagerContext(
+      MlAgentRequest.PolicyContext policyContext) {
+    PolicyManagerContext.Builder builder = PolicyManagerContext.newBuilder();
+    if (policyContext.policySetId() != null) {
+      builder.setPolicySetId(policyContext.policySetId());
+    }
+    if (policyContext.policySetVersion() != null) {
+      builder.setPolicySetVersion(policyContext.policySetVersion());
+    }
+    if (policyContext.scenarioId() != null) {
+      builder.setScenarioId(policyContext.scenarioId());
+    }
+    if (policyContext.caseId() != null) {
+      builder.setCaseId(policyContext.caseId());
+    }
+    if (policyContext.candidateId() != null) {
+      builder.setCandidateId(policyContext.candidateId());
+    }
+    if (policyContext.candidateVersion() != null) {
+      builder.setCandidateVersion(policyContext.candidateVersion());
+    }
+    if (policyContext.simulationId() != null) {
+      builder.setSimulationId(policyContext.simulationId());
+    }
+    if (policyContext.missedFraudIndicatorIds() != null) {
+      builder.addAllMissedFraudIndicatorIds(policyContext.missedFraudIndicatorIds());
+    }
+    if (policyContext.historicalSummary() != null) {
+      builder.setHistoricalSummary(policyContext.historicalSummary());
     }
     return builder.build();
   }

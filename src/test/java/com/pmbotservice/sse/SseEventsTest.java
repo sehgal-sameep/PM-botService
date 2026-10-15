@@ -2,18 +2,21 @@ package com.pmbotservice.sse;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.cmbotservice.mlagent.grpc.v1.AnswerEvent;
+import com.cmbotservice.mlagent.grpc.v1.AnswerPayload;
+import com.cmbotservice.mlagent.grpc.v1.Chunk;
+import com.cmbotservice.mlagent.grpc.v1.Done;
+import com.cmbotservice.mlagent.grpc.v1.Error;
+import com.cmbotservice.mlagent.grpc.v1.Ping;
+import com.cmbotservice.mlagent.grpc.v1.PolicyCitation;
+import com.cmbotservice.mlagent.grpc.v1.PolicyManagerAnswerPayload;
+import com.cmbotservice.mlagent.grpc.v1.PolicyMetrics;
+import com.cmbotservice.mlagent.grpc.v1.PolicyRecommendation;
+import com.cmbotservice.mlagent.grpc.v1.SimulationSummary;
+import com.cmbotservice.mlagent.grpc.v1.ToolCall;
+import com.cmbotservice.mlagent.grpc.v1.ToolResult;
 import com.google.protobuf.util.JsonFormat;
 import com.pmbotservice.common.ErrorCode;
-import com.pmbotservice.mlagent.grpc.v1.AnswerEvent;
-import com.pmbotservice.mlagent.grpc.v1.AnswerPayload;
-import com.pmbotservice.mlagent.grpc.v1.Chunk;
-import com.pmbotservice.mlagent.grpc.v1.Done;
-import com.pmbotservice.mlagent.grpc.v1.Error;
-import com.pmbotservice.mlagent.grpc.v1.GeneratedPolicy;
-import com.pmbotservice.mlagent.grpc.v1.Ping;
-import com.pmbotservice.mlagent.grpc.v1.PolicyManagerAnswerPayload;
-import com.pmbotservice.mlagent.grpc.v1.ToolCall;
-import com.pmbotservice.mlagent.grpc.v1.ToolResult;
 import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -54,21 +57,50 @@ class SseEventsTest {
               AnswerPayload.newBuilder()
                   .setPolicyManagerAnswerPayload(
                       PolicyManagerAnswerPayload.newBuilder()
-                          .addKeySignals(
-                              PolicyManagerAnswerPayload.KeySignal.newBuilder()
-                                  .setSignal("Velocity policy is active")
-                                  .addCitations("pol-2"))
+                          .setStatus(PolicyManagerAnswerPayload.Status.STATUS_CANDIDATE_READY)
+                          .setRecommendation(
+                              PolicyRecommendation.newBuilder()
+                                  .setCandidateId("candidate-01")
+                                  .setCandidateVersion("1")
+                                  .setChangeType(PolicyRecommendation.ChangeType.CHANGE_TYPE_NEW)
+                                  .setTitle("t")
+                                  .addCitationIds("e-1"))
                           .addCitations(
-                              PolicyManagerAnswerPayload.Citation.newBuilder()
-                                  .setId("pol-2")
-                                  .setSource("searchPolicies")
-                                  .addFields("policies[1].rules"))))
+                              PolicyCitation.newBuilder()
+                                  .setCitationId("e-1")
+                                  .setSourceTool("AgenticGetPolicyContext")
+                                  .addFieldPaths("missedFraudCount")
+                                  .setSourceRecordId("segment-01")
+                                  .setSnapshotId("discovery-01"))))
           .build();
 
-  private static final AnswerEvent GENERATED_POLICY =
+  /** Completed run whose candidate precision is undefined (zero denominator). */
+  private static final AnswerEvent EVALUATED_PAYLOAD =
       AnswerEvent.newBuilder()
-          .setGeneratedPolicy(
-              GeneratedPolicy.newBuilder().setPolicyJson("{\"name\":\"p1\",\"enabled\":false}"))
+          .setPayload(
+              AnswerPayload.newBuilder()
+                  .setPolicyManagerAnswerPayload(
+                      PolicyManagerAnswerPayload.newBuilder()
+                          .setStatus(PolicyManagerAnswerPayload.Status.STATUS_EVALUATED)
+                          .setSimulation(
+                              SimulationSummary.newBuilder()
+                                  .setSimulationId("sim-01")
+                                  .setStatus(SimulationSummary.Status.STATUS_COMPLETED)
+                                  .setBaselineMetrics(
+                                      PolicyMetrics.newBuilder()
+                                          .setTruePositives(80)
+                                          .setFalsePositives(180)
+                                          .setTrueNegatives(9720)
+                                          .setFalseNegatives(20)
+                                          .setPrecision(0.307692)
+                                          .setRecall(0.8)
+                                          .setFalsePositiveRate(0.018182))
+                                  .setCandidateMetrics(
+                                      PolicyMetrics.newBuilder()
+                                          .setTrueNegatives(9900)
+                                          .setFalseNegatives(100)
+                                          .setRecall(0.0)
+                                          .setFalsePositiveRate(0.0)))))
           .build();
 
   private static final AnswerEvent DONE =
@@ -99,7 +131,6 @@ class SseEventsTest {
     assertThat(SseEvents.fromAnswerEvent(DONE).event()).isEqualTo("done");
     assertThat(SseEvents.fromAnswerEvent(ERROR).event()).isEqualTo("error");
     assertThat(SseEvents.fromAnswerEvent(PING).event()).isEqualTo("ping");
-    assertThat(SseEvents.fromAnswerEvent(GENERATED_POLICY).event()).isEqualTo("generated_policy");
   }
 
   @Test
@@ -111,15 +142,7 @@ class SseEventsTest {
             .map(f -> f.getName())
             .toList();
     assertThat(contractArms)
-        .containsExactly(
-            "chunk",
-            "tool_call",
-            "tool_result",
-            "payload",
-            "done",
-            "error",
-            "ping",
-            "generated_policy");
+        .containsExactly("chunk", "tool_call", "tool_result", "payload", "done", "error", "ping");
   }
 
   @Test
@@ -136,10 +159,17 @@ class SseEventsTest {
     assertThat(data(PAYLOAD))
         .isEqualTo(
             "{\"payload\":{\"policy_manager_answer_payload\":{"
-                + "\"key_signals\":[{\"signal\":\"Velocity policy is active\","
-                + "\"citations\":[\"pol-2\"]}],"
-                + "\"citations\":[{\"id\":\"pol-2\",\"source\":\"searchPolicies\","
-                + "\"fields\":[\"policies[1].rules\"]}]}}}");
+                // Printed in field-number order, which is the contract's listing order.
+                + "\"status\":\"STATUS_CANDIDATE_READY\","
+                + "\"recommendation\":{\"candidate_id\":\"candidate-01\",\"candidate_version\":\"1\","
+                + "\"change_type\":\"CHANGE_TYPE_NEW\",\"target_policy_ids\":[],\"title\":\"t\","
+                + "\"description\":\"\",\"rationale\":\"\",\"citation_ids\":[\"e-1\"],"
+                + "\"assumptions\":[]},"
+                + "\"citations\":[{\"citation_id\":\"e-1\","
+                + "\"source_tool\":\"AgenticGetPolicyContext\","
+                + "\"source_record_id\":\"segment-01\",\"snapshot_id\":\"discovery-01\","
+                + "\"field_paths\":[\"missedFraudCount\"]}],"
+                + "\"follow_up_questions\":[],\"limitations\":[]}}}");
     assertThat(data(DONE))
         .isEqualTo(
             "{\"done\":{\"stop_reason\":\"STOP_REASON_COMPLETED\",\"latency_ms\":\"1800\","
@@ -147,11 +177,39 @@ class SseEventsTest {
     assertThat(data(ERROR))
         .isEqualTo("{\"error\":{\"code\":\"ERROR_CODE_MODEL_REFUSED\",\"retryable\":false}}");
     assertThat(data(PING)).isEqualTo("{\"ping\":{}}");
-    // policy_json stays a JSON string, untouched — the frontend parses it.
-    assertThat(data(GENERATED_POLICY))
-        .isEqualTo(
-            "{\"generated_policy\":{\"policy_json\":"
-                + "\"{\\\"name\\\":\\\"p1\\\",\\\"enabled\\\":false}\"}}");
+  }
+
+  @Test
+  void payload_absentMessagesAndUndefinedMetrics_areOmitted_neverZeroFilled() {
+    String json = data(EVALUATED_PAYLOAD);
+
+    // No recommendation was produced: absent, not an empty object.
+    assertThat(json).doesNotContain("\"recommendation\"");
+    // No impact was reported: absent, not an empty object.
+    assertThat(json).doesNotContain("\"impact\"");
+    // Candidate precision is undefined (zero denominator): omitted, not 0.
+    assertThat(json)
+        .contains(
+            "\"candidate_metrics\":{\"true_positives\":\"0\",\"false_positives\":\"0\","
+                + "\"true_negatives\":\"9900\",\"false_negatives\":\"100\",\"recall\":0.0,"
+                + "\"false_positive_rate\":0.0}")
+        // Counts are int64, so JSON strings; rates are numbers.
+        .contains(
+            "\"baseline_metrics\":{\"true_positives\":\"80\",\"false_positives\":\"180\","
+                + "\"true_negatives\":\"9720\",\"false_negatives\":\"20\","
+                + "\"precision\":0.307692,\"recall\":0.8,\"false_positive_rate\":0.018182}");
+  }
+
+  @Test
+  void payloadArm_usesFieldNumber2_leaving1ForTheSharedContractsCaseManagerArm() {
+    // The PM contract: "extend the existing oneof with policy_manager_answer_payload, using a
+    // new, unused field number. Preserve the existing Case Manager field."
+    assertThat(
+            AnswerPayload.getDescriptor()
+                .findFieldByName("policy_manager_answer_payload")
+                .getNumber())
+        .isEqualTo(2);
+    assertThat(AnswerPayload.getDescriptor().findFieldByNumber(1)).isNull();
   }
 
   @Test
@@ -169,7 +227,7 @@ class SseEventsTest {
   @Test
   void data_roundTripsBackToTheIdenticalProtoMessage_forEveryEventType() throws Exception {
     for (AnswerEvent original :
-        List.of(CHUNK, TOOL_CALL, TOOL_RESULT, PAYLOAD, DONE, ERROR, PING)) {
+        List.of(CHUNK, TOOL_CALL, TOOL_RESULT, PAYLOAD, EVALUATED_PAYLOAD, DONE, ERROR, PING)) {
       AnswerEvent.Builder parsed = AnswerEvent.newBuilder();
       JsonFormat.parser().merge(data(original), parsed);
       assertThat(parsed.build())

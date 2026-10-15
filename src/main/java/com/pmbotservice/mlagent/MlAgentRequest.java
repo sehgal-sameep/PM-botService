@@ -19,9 +19,12 @@ import java.util.List;
  * token or conversation id to echo back, and this service never assembles, stores, or replays a
  * transcript itself.
  *
- * <p>{@code operatorId} identifies the operator making the request. It comes only from the
- * frontend's request body and is {@code null} when it wasn't sent; it is never defaulted or derived
- * from the caller's {@code RequestContext.userId()}.
+ * <p>{@code operatorId} is the authenticated operator — the contract's {@code operator_id} — taken
+ * as-is from the request body's optional {@code operatorId}; {@code null} when the caller sent
+ * none.
+ *
+ * <p>{@code policyContext} is the Policy Manager context the question is about, or {@code null}
+ * when the caller sent none.
  *
  * <p>{@code accessToken} is the caller's BFF-issued token ({@code null} when the request isn't
  * authenticated). It is never part of the protobuf request — {@code GrpcMlAgentClient} sends it
@@ -37,18 +40,16 @@ public record MlAgentRequest(
     String correlationId,
     String requestId,
     String message,
+    PolicyContext policyContext,
     String accessToken) {
 
   @Override
   public String toString() {
     return "MlAgentRequest[tenantId=%s, organization=%s, historyTurns=%d, messageId=%s,"
             .formatted(tenantId, organization, history == null ? 0 : history.size(), messageId)
-        + " operatorId=%s, correlationId=%s, requestId=%s, accessTokenPresent=%s]"
-            .formatted(
-                operatorId,
-                correlationId,
-                requestId,
-                accessToken != null && !accessToken.isBlank());
+        + " operatorId=%s, correlationId=%s, requestId=%s, policyContext=%s,"
+            .formatted(operatorId, correlationId, requestId, policyContext)
+        + " accessTokenPresent=%s]".formatted(accessToken != null && !accessToken.isBlank());
   }
 
   /**
@@ -59,4 +60,19 @@ public record MlAgentRequest(
    * format.
    */
   public record HistoryTurn(String role, String content) {}
+
+  /**
+   * The Policy Manager context, mirroring the contract's {@code PolicyManagerContext}; {@code null}
+   * fields were not supplied. {@code GrpcMlAgentClient} owns mapping it onto the wire message.
+   */
+  public record PolicyContext(
+      String policySetId,
+      String policySetVersion,
+      String scenarioId,
+      String caseId,
+      String candidateId,
+      String candidateVersion,
+      String simulationId,
+      List<String> missedFraudIndicatorIds,
+      String historicalSummary) {}
 }

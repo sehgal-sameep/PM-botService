@@ -2,11 +2,16 @@ package com.pmbotservice.web.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.cmbotservice.mlagent.grpc.v1.AnswerEvent;
+import com.google.protobuf.util.JsonFormat;
 import com.pmbotservice.context.RequestHeaders;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
@@ -105,7 +110,9 @@ class ChatControllerTest {
                       "\"status\":\"STATUS_OK\"",
                       "\"row_count\":",
                       "data:{\"chunk\":{\"delta\":",
-                      "data:{\"payload\":{\"policy_manager_answer_payload\":{\"key_signals\":",
+                      "data:{\"payload\":{\"policy_manager_answer_payload\":{\"status\":"
+                          + "\"STATUS_CANDIDATE_READY\"",
+                      "\"recommendation\":{\"candidate_id\":",
                       "data:{\"done\":{\"stop_reason\":\"STOP_REASON_COMPLETED\"",
                       "\"latency_ms\":",
                       "\"tokens_in\":",
@@ -202,7 +209,7 @@ class ChatControllerTest {
   }
 
   @Test
-  void generatePolicyRequest_streamsAGeneratedPolicyEvent() {
+  void policyContextInTheBody_isAccepted_andAStatusTriggerStreamsThatPayloadStatus() {
     restTestClient
         .post()
         .uri("/back-office-ai-pm/api/v1/chat/messages")
@@ -210,7 +217,18 @@ class ChatControllerTest {
         .header(RequestHeaders.ORGANIZATION_ID, "org-1")
         .contentType(MediaType.APPLICATION_JSON)
         .accept(MediaType.TEXT_EVENT_STREAM)
-        .body(Map.of("message", "Generate a policy for transfers to new beneficiaries"))
+        .body(
+            Map.of(
+                "message",
+                "Compare it with the baseline trigger:evaluated",
+                "policyContext",
+                Map.of(
+                    "policySetId", "baseline-01",
+                    "scenarioId", "scenario-01",
+                    "candidateId", "candidate-01",
+                    "candidateVersion", "1",
+                    "missedFraudIndicatorIds", List.of("indicator-01"),
+                    "historicalSummary", "Fraud on new devices rose 18%.")))
         .exchange()
         .expectStatus()
         .isOk()
@@ -219,10 +237,46 @@ class ChatControllerTest {
             body ->
                 assertThat(body)
                     .contains(
-                        "event:generated_policy",
-                        "data:{\"generated_policy\":{\"policy_json\":",
+                        "event:payload",
+                        "\"status\":\"STATUS_EVALUATED\"",
+                        "\"baseline_metrics\":",
+                        "\"candidate_metrics\":",
                         "event:done")
-                    .doesNotContain("event:payload"));
+                    .doesNotContain("event:generated_policy"));
+  }
+
+  @Test
+  void operatorIdInTheBody_isAccepted() {
+    restTestClient
+        .post()
+        .uri("/back-office-ai-pm/api/v1/chat/messages")
+        .header(RequestHeaders.TENANT_ID, "tenant-1")
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(Map.of("operatorId", "op-7", "message", "hello"))
+        .exchange()
+        .expectStatus()
+        .isOk();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        ChatController.SSE_EXAMPLE_CANDIDATE_READY,
+        ChatController.SSE_EXAMPLE_EVALUATED,
+        ChatController.SSE_EXAMPLE_NEEDS_INPUT,
+        ChatController.SSE_EXAMPLE_AGENT_ERROR
+      })
+  void everySwaggerExampleDataLine_isAValidAnswerEvent_underTheCurrentContract(String example)
+      throws Exception {
+    // The strict parser rejects unknown fields/enum values, so a stale example fails here.
+    List<String> dataLines =
+        example.lines().filter(l -> l.startsWith("data:")).map(l -> l.substring(5)).toList();
+    assertThat(dataLines).isNotEmpty();
+    for (String json : dataLines) {
+      AnswerEvent.Builder parsed = AnswerEvent.newBuilder();
+      JsonFormat.parser().merge(json, parsed);
+      assertThat(parsed.getEventCase()).isNotEqualTo(AnswerEvent.EventCase.EVENT_NOT_SET);
+    }
   }
 
   @Test
@@ -344,5 +398,25 @@ class ChatControllerTest {
         .exchange()
         .expectStatus()
         .isNotFound();
+  }
+
+  @Test
+  void openApiDoc_documentsTheCandidateRuleCarriedInPolicyDefinition() {
+    restTestClient
+        .get()
+        .uri("/v3/api-docs")
+        .exchange()
+        .expectStatus()
+        .isOk()
+        .expectBody(String.class)
+        .value(
+            body ->
+                assertThat(body)
+                    .contains(
+                        "\"CandidateRule\"",
+                        "\"RuleExpression\"",
+                        "\"isConjunctive\"",
+                        "\"choosenStatus\"",
+                        "\"outcomeAction\""));
   }
 }

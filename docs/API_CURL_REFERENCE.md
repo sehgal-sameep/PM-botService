@@ -61,8 +61,9 @@ Streams the ML Agent's answer back as SSE, forwarded unchanged from the TF Labs
 orchestrator. The event format is in [`CHAT_API_GUIDE.md`](CHAT_API_GUIDE.md) §6.
 
 **Required headers:** `X-Tenant-Id`, `Content-Type: application/json`. (`X-Org-Id` is optional.)
-**Required body fields:** `message`. (`history`, `requestId`, `operatorId` are optional;
-unknown fields are ignored.)
+**Required body fields:** `message`. (`history`, `requestId`, `operatorId`, `policyContext`
+are optional; unknown fields are ignored. `operatorId` is forwarded as-is as the ML
+Agent's `operator_id` only when sent — never filled from `X-User-Id` or the session.)
 
 ### 1.1 Security mode `NONE` (local development)
 
@@ -76,7 +77,7 @@ curl -N -i -X POST "http://localhost:8080/back-office-ai-pm/api/v1/chat/messages
   -H "X-User-Id: <analyst-id>" \
   -H "X-Tenant-Id: <tenant>" \
   -H "X-Org-Id: <org>" \
-  -d '{"message":"Which policies are currently active?"}'
+  -d '{"message":"Recommend a policy for missed fraud and compare it with our current policies.","operatorId":"<operator-id>","policyContext":{"policySetId":"baseline-01","scenarioId":"scenario-01"}}'
 ```
 
 Continue the conversation: resend the transcript so far as `history`, oldest turn
@@ -91,18 +92,24 @@ curl -N -X POST "http://localhost:8080/back-office-ai-pm/api/v1/chat/messages" \
   -H "X-Org-Id: <org>" \
   -d '{
         "history": [
-          {"role": "user", "content": "Which policies are currently active?"},
+          {"role": "user", "content": "Recommend a policy for missed fraud and compare it with our current policies."},
           {"role": "assistant", "content": "<the answer text you received>"}
         ],
-        "message": "Generate a policy that flags high-value transfers to new beneficiaries"
+        "operatorId": "<operator-id>",
+        "policyContext": {"policySetId": "baseline-01", "scenarioId": "scenario-01", "candidateId": "candidate-01", "candidateVersion": "1"},
+        "message": "Backtest it against the baseline."
       }'
 ```
 
 All optional body fields:
 
 ```bash
-  -d '{"history":[],"requestId":"<your-request-id>","operatorId":"<operator-id>","message":"<prompt>"}'
+  -d '{"history":[],"requestId":"<your-request-id>","operatorId":"<operator-id>","policyContext":{"policySetId":"<baseline>","policySetVersion":"<version>","scenarioId":"<scenario>","caseId":"<case>","candidateId":"<candidate>","candidateVersion":"<candidate-version>","simulationId":"<simulation>","missedFraudIndicatorIds":["<indicator>"],"historicalSummary":"<summary>"},"message":"<prompt>"}'
 ```
+
+Every `policyContext` field is optional; blank strings count as "not sent".
+`candidateVersion` is a string (the contract's `optional string candidate_version`),
+passed through unchecked; `missedFraudIndicatorIds` is an array of strings.
 
 ### 1.2 Security mode `BFF_SESSION`
 
@@ -118,7 +125,7 @@ curl -N -i -X POST "http://localhost:8080/back-office-ai-pm/api/v1/chat/messages
   -H "Cookie: SESSION=<session value>" \
   -H "X-Tenant-Id: <tenant>" \
   -H "X-Org-Id: <org>" \
-  -d '{"message":"Which policies are currently active?"}'
+  -d '{"message":"Recommend a policy for missed fraud and compare it with our current policies.","operatorId":"<operator-id>","policyContext":{"policySetId":"baseline-01","scenarioId":"scenario-01"}}'
 ```
 
 `<session value>` is only the cookie's **value**, copied from the FMC UI (DevTools →
@@ -142,9 +149,12 @@ Put a keyword anywhere in `message` to simulate each outcome:
 BASE="http://localhost:8080/back-office-ai-pm/api/v1/chat/messages"
 H=(-H "Content-Type: application/json" -H "Accept: text/event-stream" -H "X-Tenant-Id: t" -H "X-Org-Id: o")
 
-curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"hello"}'                    # normal answer (payload)
-curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"trigger:generate-policy"}'  # `generated_policy` event, then `done`
-curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"Create a policy for X"}'    # same: "generate"/"create" + "policy"
+curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"hello"}'                         # payload STATUS_CANDIDATE_READY (default)
+curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"trigger:needs-input"}'           # payload STATUS_NEEDS_INPUT + follow-up questions
+curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"trigger:insufficient-data"}'     # payload STATUS_INSUFFICIENT_DATA
+curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"trigger:simulation-pending"}'    # payload STATUS_SIMULATION_PENDING (running sim)
+curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"trigger:evaluated"}'             # payload STATUS_EVALUATED (completed sim + metrics)
+curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"trigger:simulation-failed"}'     # payload STATUS_SIMULATION_FAILED
 curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"trigger:slow"}'             # slow chunks
 curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"trigger:empty"}'            # just `done`
 curl -N -X POST "$BASE" "${H[@]}" -d '{"message":"trigger:agent-error"}'      # agent's own `error` event
@@ -176,25 +186,27 @@ Each SSE event prints as `id:` / `event:` / `data:` lines followed by a blank li
 ```
 id:0
 event:tool_call
-data:{"tool_call":{"tool_call_id":"t-1","name":"searchPolicies","args_json":"{\"status\":\"ACTIVE\"}"}}
+data:{"tool_call":{"tool_call_id":"t-1","name":"AgenticGetPolicyContext","args_json":"{\"policySetId\":\"baseline-01\",\"scenarioId\":\"scenario-01\"}"}}
 
 id:1
 event:chunk
-data:{"chunk":{"delta":"The active policy set contains three transaction-monitoring policies."}}
+data:{"chunk":{"delta":"The proposed refinement is ready for simulation."}}
 ```
 
-When you ask for a new policy, the stream also carries a `generated_policy` event; its
-`policy_json` is the policy as a JSON **string** (parse it client-side). It is not
-terminal:
+A successful turn carries exactly one `payload` — the structured Policy Manager result
+(`status`, optional `recommendation` with an optional executable `policy_definition` — its `definition` is a JSON string holding a rule in the candidate rule format, see `COMPLETE_RULE_FORMAT.md` —
+optional `simulation` summary, `citations`, `follow_up_questions`, `limitations`) —
+followed by `done`:
 
 ```
 id:4
-event:generated_policy
-data:{"generated_policy":{"policy_json":"{\"name\":\"New beneficiary high-value transfer\",\"enabled\":false,...}"}}
+event:payload
+data:{"payload":{"policy_manager_answer_payload":{"status":"STATUS_CANDIDATE_READY","recommendation":{"candidate_id":"candidate-01","candidate_version":"1","change_type":"CHANGE_TYPE_REFINE",...},"citations":[...],"follow_up_questions":[],"limitations":[]}}}
 ```
 
 The stream ends with exactly one of `done`, `error` (from the ML Agent), or
-`service_error` (from this backend). After an `error`, discard any `generated_policy`
+`service_error` (from this backend). `done` means the chat turn finished — a
+simulation can still be pending. After an `error`, discard the chunks and any `payload`
 received with the rest of the turn.
 
 ---
@@ -263,7 +275,7 @@ CHAT_REQUEST_RECEIVED        messageId, message length, history size (never the 
 GRPC_CALL_STARTED            (grpc mode) target host:port   | MOCK_ML_AGENT_CALL_STARTED (mock mode)
 ML_REQUEST_STARTED           timeouts in effect
 ML_STREAM_STARTED            first event type + latency
-ML_EVENT_TOOL_CALL / _TOOL_RESULT / _PAYLOAD / _GENERATED_POLICY / _DONE / _ERROR
+ML_EVENT_TOOL_CALL / _TOOL_RESULT / _PAYLOAD (status, candidate, simulation) / _DONE / _ERROR
 ML_STREAM_COMPLETED          per-event-type counts (chunks and pings are counted here)
 SSE_STREAM_COMPLETED         frames sent to the client
 HTTP_REQUEST_COMPLETED       status, total duration

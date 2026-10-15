@@ -38,19 +38,19 @@ import reactor.core.publisher.Flux;
             + "memory (if any) is owned by the ML Agent.")
 public class ChatController {
 
-  static final String SSE_EXAMPLE_SUCCESS =
+  static final String SSE_EXAMPLE_CANDIDATE_READY =
       """
       id:0
       event:tool_call
-      data:{"tool_call":{"tool_call_id":"t-1","name":"searchPolicies","args_json":"{\\"status\\":\\"ACTIVE\\"}"}}
+      data:{"tool_call":{"tool_call_id":"t-1","name":"AgenticGetPolicyContext","args_json":"{\\"policySetId\\":\\"baseline-01\\",\\"scenarioId\\":\\"scenario-01\\"}"}}
 
       id:1
       event:tool_result
-      data:{"tool_result":{"tool_call_id":"t-1","status":"STATUS_OK","ms":"42","row_count":"7"}}
+      data:{"tool_result":{"tool_call_id":"t-1","status":"STATUS_OK","ms":"42","row_count":"3"}}
 
       id:2
       event:chunk
-      data:{"chunk":{"delta":"The active policy set contains three transaction-monitoring policies."}}
+      data:{"chunk":{"delta":"The proposed refinement is ready for simulation."}}
 
       id:3
       event:ping
@@ -58,26 +58,41 @@ public class ChatController {
 
       id:4
       event:payload
-      data:{"payload":{"policy_manager_answer_payload":{"key_signals":[{"signal":"Velocity policy is active","citations":["pol-2"]}],"citations":[{"id":"pol-2","source":"searchPolicies","fields":["policies[1].rules"]}]}}}
+      data:{"payload":{"policy_manager_answer_payload":{"status":"STATUS_CANDIDATE_READY","recommendation":{"candidate_id":"candidate-01","candidate_version":"1","change_type":"CHANGE_TYPE_REFINE","target_policy_ids":["policy-17"],"title":"Review high-risk transactions on new devices","description":"Add a supported device signal to the existing condition.","rationale":"Historical discovery evidence indicates a gap.","policy_definition":{"format":"candidate-rule-format","schema_version":"1.0","definition":"{\\"position\\":5,\\"context\\":{\\"name\\":\\"tenant-123\\",\\"id\\":\\"org-123\\"},\\"details\\":{\\"name\\":\\"Review high-risk transactions on new devices\\",\\"choosenStatus\\":\\"WORK_IN_PROGRESS\\",\\"ruleOrder\\":5,\\"eventTypes\\":[{\\"name\\":\\"TRANSFER\\"}]},\\"conditions\\":{\\"conditions\\":[{\\"isConjunctive\\":true,\\"expressions\\":[{\\"operand\\":\\"deviceAgeDays\\",\\"operator\\":\\"LESS_THAN\\",\\"factType\\":\\"INTEGER\\",\\"factCategory\\":\\"DEFAULT\\",\\"valueString\\":\\"2\\",\\"isListExpression\\":false}]}]},\\"actions\\":{\\"outcomeAction\\":\\"CHALLENGE\\",\\"authMethods\\":[{\\"name\\":\\"OTP\\",\\"displayName\\":\\"One-Time Password\\"}]}}"},"citation_ids":["evidence-01"],"assumptions":[],"confidence":0.72},"citations":[{"citation_id":"evidence-01","source_tool":"AgenticGetPolicyContext","source_record_id":"segment-01","snapshot_id":"discovery-01","field_paths":["missedFraudCount"]}],"follow_up_questions":[],"limitations":[]}}}
 
       id:5
       event:done
       data:{"done":{"stop_reason":"STOP_REASON_COMPLETED","latency_ms":"1800","tokens_in":"12","tokens_out":"140"}}
       """;
 
-  static final String SSE_EXAMPLE_GENERATED_POLICY =
+  static final String SSE_EXAMPLE_EVALUATED =
       """
       id:0
       event:chunk
-      data:{"chunk":{"delta":"Here is a new policy based on your request."}}
+      data:{"chunk":{"delta":"The candidate raised recall from 0.80 to 0.90 on the evaluation snapshot."}}
 
       id:1
-      event:generated_policy
-      data:{"generated_policy":{"policy_json":"{\\"name\\":\\"New beneficiary high-value transfer\\",\\"enabled\\":false}"}}
+      event:payload
+      data:{"payload":{"policy_manager_answer_payload":{"status":"STATUS_EVALUATED","recommendation":{"candidate_id":"candidate-01","candidate_version":"1","change_type":"CHANGE_TYPE_REFINE","target_policy_ids":["policy-17"],"title":"Review high-risk transactions on new devices","description":"","rationale":"","citation_ids":[],"assumptions":[]},"simulation":{"simulation_id":"sim-01","status":"STATUS_COMPLETED","candidate_id":"candidate-01","candidate_version":"1","baseline_policy_set_id":"baseline-01","baseline_policy_set_version":"7","snapshot_id":"evaluation-01","baseline_metrics":{"true_positives":"80","false_positives":"180","true_negatives":"9720","false_negatives":"20","precision":0.307692,"recall":0.8,"false_positive_rate":0.018182},"candidate_metrics":{"true_positives":"90","false_positives":"200","true_negatives":"9700","false_negatives":"10","precision":0.310345,"recall":0.9,"false_positive_rate":0.020202},"limitations":[],"impact":{"fraud_capture_uplift":0.1,"false_positive_delta":"20"}},"citations":[],"follow_up_questions":[],"limitations":[]}}}
 
       id:2
       event:done
-      data:{"done":{"stop_reason":"STOP_REASON_COMPLETED","latency_ms":"1500","tokens_in":"20","tokens_out":"180"}}
+      data:{"done":{"stop_reason":"STOP_REASON_COMPLETED","latency_ms":"2400","tokens_in":"30","tokens_out":"160"}}
+      """;
+
+  static final String SSE_EXAMPLE_NEEDS_INPUT =
+      """
+      id:0
+      event:chunk
+      data:{"chunk":{"delta":"Which baseline policy set and historical scenario should I analyze?"}}
+
+      id:1
+      event:payload
+      data:{"payload":{"policy_manager_answer_payload":{"status":"STATUS_NEEDS_INPUT","citations":[],"follow_up_questions":["Which baseline policy set should I compare against?"],"limitations":[]}}}
+
+      id:2
+      event:done
+      data:{"done":{"stop_reason":"STOP_REASON_COMPLETED","latency_ms":"900","tokens_in":"10","tokens_out":"40"}}
       """;
 
   static final String SSE_EXAMPLE_AGENT_ERROR =
@@ -116,8 +131,14 @@ public class ChatController {
                     between requests.
 
                     The `X-Tenant-Id` request header and the body's `message` are required; the \
-                    `X-Org-Id` header, `operatorId`, `requestId` and `history` are optional. Each message \
-                    is plain question/answer. The ML Agent's contract has no conversation/continuation \
+                    `X-Org-Id` header, `operatorId`, `policyContext`, `requestId` and `history` are \
+                    optional. Every field the ML Agent asks for comes from this body and is \
+                    forwarded as-is: `operatorId` (the authenticated operator) becomes \
+                    `operator_id`, and `policyContext` (policySetId, policySetVersion, scenarioId, \
+                    caseId, candidateId, candidateVersion, simulationId, missedFraudIndicatorIds, \
+                    historicalSummary — all optional) becomes \
+                    `policy_context`. The ML Agent's \
+                    contract has no conversation/continuation \
                     identifier at all — `history` is the sole resumption mechanism: omit it to start \
                     a new conversation, or resend the full transcript (oldest turn first) to continue \
                     one. `requestId` is an optional caller-generated identifier forwarded for \
@@ -125,17 +146,20 @@ public class ChatController {
                     caller — not this backend — is responsible for remembering and resending `history`.
 
                     SSE event contract — the ML Agent's (`ChatAgent.AskPolicyManager`)                     response, forwarded as-is. This backend does not rename events or fields,                     reshape payloads, or add its own wrapper. For every ML Agent `AnswerEvent`:
-                    - `event:` is the name of the `AnswerEvent` oneof field that is set — one of                     `chunk`, `tool_call`, `tool_result`, `payload`, `generated_policy`, `done`,                     `error`, `ping`.
-                    - `data:` is that whole `AnswerEvent` as canonical proto3 JSON, with the                     original `.proto` field names and nesting (see `src/main/proto/*.proto`): e.g.                     `{"tool_call":{"tool_call_id":"t-1","name":"searchPolicies","args_json":"{...}"}}`.                     Enums are their proto names (`STATUS_OK`, `STOP_REASON_TRUNCATED`,                     `ERROR_CODE_MODEL_REFUSED`), fields at their default value are still present,                     and `int64` fields (`ms`, `row_count`, `latency_ms`, `tokens_in`, `tokens_out`)                     are JSON strings, per the proto3 JSON mapping.
+                    - `event:` is the name of the `AnswerEvent` oneof field that is set — one of                     `chunk`, `tool_call`, `tool_result`, `payload`, `done`, `error`, `ping`.
+                    - `data:` is that whole `AnswerEvent` as canonical proto3 JSON, with the                     original `.proto` field names and nesting (see `src/main/proto/**/*.proto`): e.g.                     `{"tool_call":{"tool_call_id":"t-1","name":"searchPolicies","args_json":"{...}"}}`.                     Enums are their proto names (`STATUS_OK`, `STOP_REASON_TRUNCATED`,                     `ERROR_CODE_MODEL_REFUSED`), fields at their default value are still present,                     and `int64` fields (`ms`, `row_count`, `latency_ms`, `tokens_in`, `tokens_out`,                     the confusion-matrix counts and `false_positive_delta`) are JSON strings, per the proto3 JSON mapping.                     Unset `optional` scalars (`precision`, `recall`, `false_positive_rate`, `confidence`,                     `fraud_capture_uplift`, `net_impact`, citation `snapshot_id`) and absent messages                     (`recommendation`, `simulation`, `policy_definition`, metrics, `impact`) are                     omitted rather than zero-filled.
                     - `id:` is a 0-based frame counter added by this backend (SSE transport only).
 
-                    Events arrive in the order the ML Agent produced them. The ML Agent's own                     contract rules apply unchanged: consecutive `chunk` events form one text block;                     `payload` may arrive at any point; `done` and `error` are terminal; `ping` is a                     keepalive with no content; clients must ignore event names they don't recognise.                     `generated_policy` is sent when the user asked the agent to create a policy:                     `policy_json` is the new policy as a JSON string (parse it client-side). It is                     not terminal — the stream still ends with `done` (keep the policy) or `error`                     (discard it with the rest of the turn).                     The ML Agent's `error` event (a model-level failure: `code`, `retryable`) is                     forwarded like any other event, never translated.
+                    Events arrive in the order the ML Agent produced them. The ML Agent's own                     contract rules apply unchanged: consecutive `chunk` events form one text block;                     `payload` may arrive at any point; `done` and `error` are terminal; `ping` is a                     keepalive with no content; clients must ignore event names they don't recognise.                     The natural-language answer streams through `chunk`; the structured result                     arrives through `payload` (`policy_manager_answer_payload`): a `status`                     (STATUS_NEEDS_INPUT, STATUS_CANDIDATE_READY, STATUS_SIMULATION_PENDING,                     STATUS_EVALUATED, STATUS_INSUFFICIENT_DATA, STATUS_SIMULATION_FAILED), an                     optional `recommendation` (with an optional executable `policy_definition` whose `definition` is a JSON string holding a                     rule in the candidate rule format — see the `CandidateRule` schema below; `format`                     `candidate-rule-format`, `schema_version` `1.0` — plus `assumptions` and an                     optional `confidence`),                     an optional `simulation` summary (with an optional baseline-vs-candidate `impact`), `citations`, `follow_up_questions` and                     `limitations`. A successful turn emits one `payload`, followed by `done`;                     `done` means the chat turn finished — a simulation can still be pending.                     The ML Agent's `error` event (a model-level failure: `code`, `retryable`) is                     forwarded like any other event, never translated.
 
                     The one event this backend adds: `service_error` —                     { messageId, errorCode, errorMessage, timestamp } — sent (terminal) only when a                     failure produced no ML Agent event of its own: the agent could not be reached,                     timed out, or rejected the call at the transport level, or this backend's own                     circuit breaker/bulkhead/validation stopped it. `errorCode` is one of                     ML_AGENT_TIMEOUT, ML_AGENT_UNAVAILABLE, ML_AGENT_ERROR, NOT_FOUND,                     VALIDATION_ERROR, CONCURRENCY_LIMIT_REACHED (bulkhead full or circuit breaker                     open), INTERNAL_ERROR. Because the HTTP status is already committed to 200 by                     then, these always arrive on this same stream, never as a different HTTP status.
 
                     For local testing, the mock ML Agent recognizes these keywords anywhere in \
                     `message` to simulate each failure mode: `trigger:slow`, `trigger:timeout`, \
-                    `trigger:error`, `trigger:empty`, `trigger:rejected`, `trigger:agent-error`,                     `trigger:generate-policy` (or just ask it to "generate a policy").
+                    `trigger:error`, `trigger:empty`, `trigger:rejected`, `trigger:agent-error`, and \
+                    each payload status: `trigger:needs-input`, `trigger:insufficient-data`, \
+                    `trigger:simulation-pending`, `trigger:evaluated`, `trigger:simulation-failed` \
+                    (default: STATUS_CANDIDATE_READY).
 
                     Swagger UI's "Try it out" does not render a live SSE stream well (it waits \
                     for the connection to end, then shows the buffered body). To watch events \
@@ -148,7 +172,7 @@ public class ChatController {
                       -H "X-User-Id: analyst-1" \\
                       -H "X-Tenant-Id: tenant-123" \\
                       -H "X-Org-Id: org-123" \\
-                      -d '{"message":"Generate a policy that flags high-value transfers to new beneficiaries"}'
+                      -d '{"operatorId":"analyst-1","message":"Recommend a policy for missed fraud and compare it with our current policies.","policyContext":{"policySetId":"baseline-01","scenarioId":"scenario-01"}}'
                     ```
                     """)
   @ApiResponse(
@@ -162,13 +186,17 @@ public class ChatController {
               schema = @Schema(type = "string"),
               examples = {
                 @ExampleObject(
-                    name = "Successful answer",
-                    summary = "tool trace, streamed text, structured payload, done",
-                    value = SSE_EXAMPLE_SUCCESS),
+                    name = "Candidate ready",
+                    summary = "tool trace, streamed text, recommendation payload, done",
+                    value = SSE_EXAMPLE_CANDIDATE_READY),
                 @ExampleObject(
-                    name = "Generated policy",
-                    summary = "the user asked for a new policy: text, generated_policy, done",
-                    value = SSE_EXAMPLE_GENERATED_POLICY),
+                    name = "Evaluated",
+                    summary = "recommendation with completed baseline/candidate simulation metrics",
+                    value = SSE_EXAMPLE_EVALUATED),
+                @ExampleObject(
+                    name = "Needs input",
+                    summary = "no baseline/scenario resolvable: follow-up questions",
+                    value = SSE_EXAMPLE_NEEDS_INPUT),
                 @ExampleObject(
                     name = "ML Agent error event",
                     summary = "the agent's own model-level error, forwarded untouched",

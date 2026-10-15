@@ -1,9 +1,9 @@
 package com.pmbotservice.sse;
 
+import com.cmbotservice.mlagent.grpc.v1.AnswerEvent;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.util.JsonFormat;
 import com.pmbotservice.common.MlAgentMalformedResponseException;
-import com.pmbotservice.mlagent.grpc.v1.AnswerEvent;
 import org.springframework.http.codec.ServerSentEvent;
 
 /**
@@ -15,9 +15,8 @@ import org.springframework.http.codec.ServerSentEvent;
  *
  * <ul>
  *   <li>{@code event:} is the name of the {@code AnswerEvent} oneof field that is set ({@code
- *       chunk}, {@code tool_call}, {@code tool_result}, {@code payload}, {@code generated_policy},
- *       {@code done}, {@code error}, {@code ping}), read from the protobuf descriptor — never a
- *       name of our own.
+ *       chunk}, {@code tool_call}, {@code tool_result}, {@code payload}, {@code done}, {@code
+ *       error}, {@code ping}), read from the protobuf descriptor — never a name of our own.
  *   <li>{@code data:} is the whole {@code AnswerEvent} in the canonical proto3 JSON mapping, with
  *       the original {@code .proto} field names preserved ({@code tool_call_id}, not {@code
  *       toolCallId}), the original nesting (e.g. {@code
