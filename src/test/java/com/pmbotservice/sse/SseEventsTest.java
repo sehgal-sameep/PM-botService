@@ -202,8 +202,7 @@ class SseEventsTest {
 
   @Test
   void payloadArm_usesFieldNumber2_leaving1ForTheSharedContractsCaseManagerArm() {
-    // The PM contract: "extend the existing oneof with policy_manager_answer_payload, using a
-    // new, unused field number. Preserve the existing Case Manager field."
+    // The Policy Manager arm takes a new number; 1 stays the shared contract's Case Manager arm.
     assertThat(
             AnswerPayload.getDescriptor()
                 .findFieldByName("policy_manager_answer_payload")

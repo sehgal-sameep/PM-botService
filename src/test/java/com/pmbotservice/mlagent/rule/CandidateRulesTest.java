@@ -15,7 +15,11 @@ class CandidateRulesTest {
 
   /** The full-rule examples in the spec: every ```json block with no "..." placeholder. */
   private static List<String> specExamples() throws IOException {
-    String spec = Files.readString(Path.of("docs/COMPLETE_RULE_FORMAT.md"));
+    return examplesIn("docs/COMPLETE_RULE_FORMAT.md");
+  }
+
+  private static List<String> examplesIn(String file) throws IOException {
+    String spec = Files.readString(Path.of(file));
     Matcher m = Pattern.compile("```json\\r?\\n(.*?)```", Pattern.DOTALL).matcher(spec);
     List<String> blocks = new java.util.ArrayList<>();
     while (m.find()) {
@@ -142,5 +146,20 @@ class CandidateRulesTest {
         .isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(() -> CandidateRules.fromJson("null"))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void theExampleSharedWithTfLabs_parsesToTheDocumentedRule() throws IOException {
+    List<String> examples = examplesIn("docs/CANDIDATE_RULE_FORMAT.md");
+    assertThat(examples).hasSize(1);
+
+    CandidateRule rule = CandidateRules.fromJson(examples.getFirst());
+    assertThat(rule.id()).isNull();
+    assertThat(rule.position()).isEqualTo(5);
+    assertThat(rule.context().name()).isEqualTo("tenant-01");
+    assertThat(rule.details().choosenStatus()).isEqualTo("WORK_IN_PROGRESS");
+    assertThat(rule.conditions().conditions().getFirst().expressions()).hasSize(3);
+    assertThat(rule.actions().authMethods()).isNotEmpty();
+    assertThat(CandidateRules.fromJson(CandidateRules.toJson(rule))).isEqualTo(rule);
   }
 }

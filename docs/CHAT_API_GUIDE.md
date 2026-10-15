@@ -241,7 +241,7 @@ serialized them. Parse it separately if you need it.
 
 `recommendation.policy_definition.definition` is a **JSON string** (parse it with
 `JSON.parse`) holding one rule in the simulation engine's candidate rule format v1.0 —
-see [`COMPLETE_RULE_FORMAT.md`](COMPLETE_RULE_FORMAT.md). `format` is
+see [`CANDIDATE_RULE_FORMAT.md`](CANDIDATE_RULE_FORMAT.md). `format` is
 `candidate-rule-format` and `schema_version` is `1.0`. The parsed object is shaped like:
 
 ```json

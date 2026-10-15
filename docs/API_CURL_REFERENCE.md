@@ -194,7 +194,7 @@ data:{"chunk":{"delta":"The proposed refinement is ready for simulation."}}
 ```
 
 A successful turn carries exactly one `payload` — the structured Policy Manager result
-(`status`, optional `recommendation` with an optional executable `policy_definition` — its `definition` is a JSON string holding a rule in the candidate rule format, see `COMPLETE_RULE_FORMAT.md` —
+(`status`, optional `recommendation` with an optional executable `policy_definition` — its `definition` is a JSON string holding a rule in the candidate rule format, see `CANDIDATE_RULE_FORMAT.md` —
 optional `simulation` summary, `citations`, `follow_up_questions`, `limitations`) —
 followed by `done`:
 

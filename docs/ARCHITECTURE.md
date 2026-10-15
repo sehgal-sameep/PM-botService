@@ -206,8 +206,8 @@ Every one of these is forwarded to the frontend unchanged (§5).
 
 `payload` (`PolicyManagerAnswerPayload`, the `policy_manager_answer_payload` arm —
 `AnswerPayload` field **2**; field 1 is reserved for the shared contract's
-`case_manager_answer_payload`, per the PM contract: "using a new, unused field number.
-Preserve the existing Case Manager field"). JSON is printed in field-number order:
+`case_manager_answer_payload`, which stays untouched). JSON is printed in field-number
+order:
 
 ```json
 {
@@ -313,13 +313,12 @@ and `docs/policy_manager/v1/policy_manager.proto` (with `docs/README.md`). They 
 build if the two copies ever differ, so to adopt a new TF Labs drop, copy both files over
 unchanged. Everything TF Labs left to us lives in our own `orchestrator/v1/chat_agent.proto`:
 the `AskPolicyManager` rpc and the `policy_manager_answer_payload` arm (`AnswerPayload` field
-2; field 1 stays reserved for the Case Manager arm). The two PDFs in `docs/` are earlier
-drafts and background only; where they differ from the proto files, the proto files win.
+2; field 1 stays reserved for the Case Manager arm). The candidate policy carried in
+`policy_definition.definition` is specified in `docs/CANDIDATE_RULE_FORMAT.md` (shared
+with TF Labs), a subset of the simulator's `docs/COMPLETE_RULE_FORMAT.md`.
 
 The shared `ChatAgent` service also serves `AskCaseManager`; this PM backend deliberately
-doesn't declare it or its types (a gRPC client only needs the methods it calls). The HTTP
-error codes in the agentic interface doc (401…429, 503, 4221/4222) belong to TF Labs' REST
-`POST /v1/chat`, not this gRPC contract.
+doesn't declare it or its types (a gRPC client only needs the methods it calls).
 
 What adopting the finalized files changed on the wire:
 
@@ -349,10 +348,9 @@ Other notes:
   `operatorId` body field. The contract calls it the "authenticated operator, populated
   by the backend", so the frontend must send the authenticated operator's id; this
   backend does not derive or check it.
-- **Not in the proto** (from the agentic interface's REST `/v1/chat`): `options.runBacktest`,
-  top-level `answer`, `validationStatus`, `review`, `candidateHash`, the comparison
-  `constraintCheck`, `conversationId`/`continuation`, and `contextToken` (the access token
-  still travels as `authorization: Bearer` call metadata).
+- **No conversation id, continuation or context token** in the proto: `history` is the only
+  resumption mechanism, and the access token travels as `authorization: Bearer` call
+  metadata.
 - **No status for a purely informational answer** — every successful turn must carry
   one of the six statuses.
 
