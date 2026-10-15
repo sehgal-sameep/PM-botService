@@ -42,6 +42,24 @@ developer or a new teammate. For copy-paste curl commands for every endpoint (us
 rather than Swagger's "Try it out", which can't send the session cookie or show a live
 stream), see [`docs/API_CURL_REFERENCE.md`](docs/API_CURL_REFERENCE.md).
 
+## Index
+
+- [Project setup & build](#project-setup--build)
+- [The one endpoint](#the-one-endpoint)
+- [Authentication](#authentication)
+- [SSE event contract (FE ↔ BE)](#sse-event-contract-fe--be)
+- [Resilience behavior](#resilience-behavior)
+- [Health, readiness, and graceful shutdown](#health-readiness-and-graceful-shutdown)
+- [Console logging](#console-logging)
+- [Metrics and tracing](#metrics-and-tracing)
+- [Configuration](#configuration)
+  - [Environment variables](#environment-variables)
+- [Tests](#tests)
+- [Docker](#docker)
+- [Replacing the mock with the real ML Agent](#replacing-the-mock-with-the-real-ml-agent)
+- [Statelessness and horizontal scaling](#statelessness-and-horizontal-scaling)
+- [Known limitations](#known-limitations)
+
 ## Project setup & build
 
 ### Prerequisites
@@ -477,6 +495,33 @@ fails startup, not a request. See `src/main/resources/application.yml`:
 | `chat.max-message-length` | Runtime-checked ceiling (alongside the hard `@Size(max=4000)` on the DTO) |
 | `chat.max-stream-duration` | Absolute per-request ML Agent call deadline |
 | `app.mock-ml-agent.chunk-delay-ms` / `slow-chunk-delay-ms` | Mock-only chunk pacing |
+
+### Environment variables
+
+Placeholders referenced in `src/main/resources/application.yml`. Each one is optional:
+`application.yml` supplies the default, so set only the ones you need to override (see
+that file for the defaults).
+
+| Variable | Property |
+|---|---|
+| `SERVER_PORT` | `server.port` |
+| `REDIS_HOST` | `spring.data.redis.host` |
+| `REDIS_PORT` | `spring.data.redis.port` |
+| `REDIS_PASSWORD` | `spring.data.redis.password` |
+| `REDIS_SSL` | `spring.data.redis.ssl.enabled` |
+| `REDIS_AZURE_PASSWORDLESS_ENABLED` | `spring.data.redis.azure.passwordless-enabled` |
+| `TRACING_SAMPLING_PROBABILITY` | `management.tracing.sampling.probability` |
+| `API_BASE_PATH` | `chatbot.api.base-path` |
+| `CHATBOT_SECURITY_MODE` | `chatbot.security.mode` |
+| `CORS_ALLOWED_ORIGINS` | `chatbot.security.cors.allowed-origins` |
+| `ML_AGENT_MODE` | `ml-agent.mode` |
+| `ML_AGENT_GRPC_HOST` | `ml-agent.grpc-host` |
+| `ML_AGENT_GRPC_PORT` | `ml-agent.grpc-port` |
+| `ML_AGENT_FIRST_RESPONSE_TIMEOUT` | `ml-agent.first-response-timeout` |
+| `ML_AGENT_IDLE_TIMEOUT` | `ml-agent.idle-timeout` |
+| `MAX_CHAT_MESSAGE_LENGTH` | `chat.max-message-length` |
+| `MAX_CHAT_STREAM_DURATION` | `chat.max-stream-duration` |
+| `LOG_LEVEL_COM_PMBOTSERVICE` | `logging.level.com.pmbotservice` |
 
 ## Tests
 
