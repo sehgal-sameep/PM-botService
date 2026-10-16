@@ -211,7 +211,7 @@ curl -s -X POST "http://localhost:8080/back-office-ai-pm/api/v1/chat/messages" -
 
 ### 5. Force the circuit breaker open (local demo)
 
-With default config (`failure-rate-threshold: 50`, `minimum-number-of-calls: 5`), a
+With default config (`enabled: true`, `failure-rate-threshold: 50`, `minimum-number-of-calls: 5`), a
 couple of `trigger:error` calls will open it. Each call makes up to 4 attempts (1 + 3
 retries, since nothing has streamed yet), and every attempt counts toward the breaker:
 
@@ -478,6 +478,7 @@ fails startup, not a request. See `src/main/resources/application.yml`:
 | `ml-agent.grpc-host` / `grpc-port` | Only used in `mode: grpc` — the ML Agent's gRPC endpoint |
 | `ml-agent.first-response-timeout` / `idle-timeout` | Per-element `Flux` timeout, client-agnostic (no separate gRPC deadline exists) |
 | `ml-agent.grpc-max-inbound-message-size` | Max size of one message the gRPC channel will accept (`mode: grpc` only) |
+| `resilience.circuit-breaker.enabled` | `true` (default) or `false` — turns the ML Agent circuit breaker on/off; when off, calls are never rejected as breaker-open (bulkhead, timeouts and retry still apply) |
 | `resilience.circuit-breaker.*` | failure-rate-threshold, sliding-window-size, wait-duration-in-open-state, permitted-calls-in-half-open-state, minimum-number-of-calls |
 | `resilience.bulkhead.*` | max-concurrent-calls, max-wait-duration |
 | `resilience.retry.*` | max-attempts, initial-backoff, max-backoff, jitter-factor |
@@ -508,6 +509,7 @@ that file for the defaults).
 | `ML_AGENT_GRPC_PORT` | `ml-agent.grpc-port` |
 | `ML_AGENT_FIRST_RESPONSE_TIMEOUT` | `ml-agent.first-response-timeout` |
 | `ML_AGENT_IDLE_TIMEOUT` | `ml-agent.idle-timeout` |
+| `ML_AGENT_CIRCUIT_BREAKER_ENABLED` | `resilience.circuit-breaker.enabled` |
 | `MAX_CHAT_MESSAGE_LENGTH` | `chat.max-message-length` |
 | `MAX_CHAT_STREAM_DURATION` | `chat.max-stream-duration` |
 | `LOG_LEVEL_COM_PMBOTSERVICE` | `logging.level.com.pmbotservice` |

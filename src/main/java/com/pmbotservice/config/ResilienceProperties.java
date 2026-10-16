@@ -22,7 +22,14 @@ public record ResilienceProperties(
     @NotNull @Valid Bulkhead bulkhead,
     @NotNull @Valid Retry retry) {
 
+  /**
+   * {@code enabled = false} takes the circuit breaker out of the ML Agent call chain entirely: no
+   * call is ever rejected as {@code CONCURRENCY_LIMIT_REACHED} because the breaker is open. The
+   * remaining thresholds are still bound and validated, so turning it back on needs no other
+   * change.
+   */
   public record CircuitBreaker(
+      boolean enabled,
       @Positive @DecimalMax("100") float failureRateThreshold,
       @Positive int slidingWindowSize,
       @NotNull Duration waitDurationInOpenState,

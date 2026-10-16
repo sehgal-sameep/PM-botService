@@ -625,6 +625,13 @@ in these registries automatically, so no manual metrics-binding code is needed (
 earlier version of this file had some — removed after a duplicate-registration warning
 in tests revealed it was redundant).
 
+**On/off switch:** `resilience.circuit-breaker.enabled` (env `ML_AGENT_CIRCUIT_BREAKER_ENABLED`,
+default `true`). When `false`, `ChatOrchestrationServiceImpl` leaves the circuit breaker
+operator out of the chain, so no call is rejected as breaker-open; bulkhead, timeouts and
+retry are unaffected. The "mlAgent" instance is still registered (it simply stays `CLOSED`
+in `/actuator/circuitbreakers`), its thresholds are still validated, and a
+`CIRCUIT_BREAKER_DISABLED` WARN is logged at startup.
+
 Composition in `ChatOrchestrationService` (order matters — each retry must
 re-acquire a bulkhead permit and re-check the breaker, which works because
 `retryWhen` re-subscribes the whole upstream chain, including the CB/Bulkhead

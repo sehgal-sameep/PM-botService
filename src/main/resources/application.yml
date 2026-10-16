@@ -144,6 +144,10 @@ ml-agent:
 
 resilience:
   circuit-breaker:
+    # Master switch for the ML Agent circuit breaker. false = calls are never rejected
+    # because the breaker is open (bulkhead, timeouts and retry still apply); the
+    # thresholds below are kept and take effect again when switched back on.
+    enabled: ${ML_AGENT_CIRCUIT_BREAKER_ENABLED:false}
     failure-rate-threshold: 50
     sliding-window-size: 10
     wait-duration-in-open-state: 30s

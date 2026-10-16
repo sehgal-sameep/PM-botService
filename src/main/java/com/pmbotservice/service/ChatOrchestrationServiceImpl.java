@@ -50,11 +50,12 @@ import reactor.util.retry.Retry;
 
 /**
  * Default {@link ChatOrchestrationService}: calls the ML Agent (behind the {@link MlAgentClient}
- * interface — never a concrete client type) through circuit breaker + bulkhead + timeout + retry,
- * and relays the streamed response as SSE. Fully non-blocking end to end — nothing here holds a
- * thread, sleeps, or buffers the full response; every layer of protection is a declarative {@code
- * Flux} operator, and cancellation (a client disconnect) tears the whole chain down automatically
- * via Reactor's own propagation.
+ * interface — never a concrete client type) through circuit breaker (unless disabled by {@code
+ * resilience.circuit-breaker.enabled}) + bulkhead + timeout + retry, and relays the streamed
+ * response as SSE. Fully non-blocking end to end — nothing here holds a thread, sleeps, or buffers
+ * the full response; every layer of protection is a declarative {@code Flux} operator, and
+ * cancellation (a client disconnect) tears the whole chain down automatically via Reactor's own
+ * propagation.
  *
  * <p>A transparent proxy for the response contract: every ML Agent {@link AnswerEvent} is forwarded
  * to the frontend as-is (event name and payload exactly as the agent sent them — see {@link
@@ -73,6 +74,7 @@ public class ChatOrchestrationServiceImpl implements ChatOrchestrationService {
 
   private final MlAgentClient mlAgentClient;
   private final CircuitBreaker circuitBreaker;
+  private final boolean circuitBreakerEnabled;
   private final Bulkhead bulkhead;
   private final ChatMetrics metrics;
   private final MlAgentProperties mlAgentProperties;
@@ -89,6 +91,7 @@ public class ChatOrchestrationServiceImpl implements ChatOrchestrationService {
       ChatProperties chatProperties) {
     this.mlAgentClient = mlAgentClient;
     this.circuitBreaker = mlAgentCircuitBreaker;
+    this.circuitBreakerEnabled = resilienceProperties.circuitBreaker().enabled();
     this.bulkhead = mlAgentBulkhead;
     this.metrics = metrics;
     this.mlAgentProperties = mlAgentProperties;
@@ -220,7 +223,7 @@ public class ChatOrchestrationServiceImpl implements ChatOrchestrationService {
                   eventCounts.merge(evt.getEventCase(), 1, Integer::sum);
                   logAgentEvent(messageId, evt, agentErrorEventSeen);
                 })
-            .transformDeferred(CircuitBreakerOperator.of(circuitBreaker))
+            .transformDeferred(this::withCircuitBreaker)
             .transformDeferred(BulkheadOperator.of(bulkhead))
             .timeout(
                 Mono.delay(mlAgentProperties.firstResponseTimeout()),
@@ -311,6 +314,13 @@ public class ChatOrchestrationServiceImpl implements ChatOrchestrationService {
         policyContext.simulationId(),
         policyContext.missedFraudIndicatorIds(),
         policyContext.historicalSummary());
+  }
+
+  /** The circuit breaker operator, or the stream unchanged when it is disabled by config. */
+  private Flux<AnswerEvent> withCircuitBreaker(Flux<AnswerEvent> calls) {
+    return circuitBreakerEnabled
+        ? calls.transform(CircuitBreakerOperator.of(circuitBreaker))
+        : calls;
   }
 
   private static boolean isRetryable(Throwable ex) {

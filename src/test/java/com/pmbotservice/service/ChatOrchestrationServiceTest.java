@@ -76,9 +76,20 @@ class ChatOrchestrationServiceTest {
       int maxRetryAttempts,
       ChatProperties chatProperties,
       MlAgentClient client) {
+    return newService(cb, bh, maxRetryAttempts, chatProperties, client, true);
+  }
+
+  private ChatOrchestrationService newService(
+      CircuitBreaker cb,
+      Bulkhead bh,
+      int maxRetryAttempts,
+      ChatProperties chatProperties,
+      MlAgentClient client,
+      boolean circuitBreakerEnabled) {
     ResilienceProperties resilienceProperties =
         new ResilienceProperties(
-            new ResilienceProperties.CircuitBreaker(50f, 10, Duration.ofSeconds(30), 2, 5),
+            new ResilienceProperties.CircuitBreaker(
+                circuitBreakerEnabled, 50f, 10, Duration.ofSeconds(30), 2, 5),
             new ResilienceProperties.Bulkhead(50, Duration.ZERO),
             new ResilienceProperties.Retry(
                 maxRetryAttempts, Duration.ofMillis(1), Duration.ofMillis(10), 0.1));
@@ -190,6 +201,38 @@ class ChatOrchestrationServiceTest {
         .block(Duration.ofSeconds(5));
 
     assertThat(attempts.get()).isEqualTo(1);
+  }
+
+  @Test
+  void disabledCircuitBreaker_isBypassed_soAnOpenBreakerNeverRejectsTheCall() {
+    AtomicInteger callCount = new AtomicInteger();
+    MlAgentClient succeeds =
+        request ->
+            Flux.defer(
+                () -> {
+                  callCount.incrementAndGet();
+                  return Flux.just(DONE);
+                });
+    CircuitBreaker forcedOpen = CircuitBreaker.ofDefaults("cb-disabled");
+    forcedOpen.transitionToForcedOpenState();
+    ChatOrchestrationService service =
+        newService(
+            forcedOpen,
+            Bulkhead.ofDefaults("bh-disabled"),
+            1,
+            defaultChatProperties(),
+            succeeds,
+            false);
+
+    List<ServerSentEvent<Object>> events =
+        service
+            .streamMessage(context(), chatRequest("hello"))
+            .collectList()
+            .block(Duration.ofSeconds(5));
+
+    assertThat(callCount.get()).isEqualTo(1);
+    assertThat(events).extracting(ServerSentEvent::event).containsExactly("done");
+    assertThat(forcedOpen.getMetrics().getNumberOfNotPermittedCalls()).isZero();
   }
 
   @Test
